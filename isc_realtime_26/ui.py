@@ -69,7 +69,7 @@ except ImportError:
 # ══════════════════════════════════════════════════════════════════════════════
 #  VERSION  — patched automatically by GitHub Actions on each release tag
 # ══════════════════════════════════════════════════════════════════════════════
-APP_VERSION    = "2.2.0"
+APP_VERSION    = "2.3.0"
 _RELEASES_URL  = "https://api.github.com/repos/MrAndy5/ISCmetrics/releases/latest"
 _RELEASES_PAGE = "https://github.com/MrAndy5/ISCmetrics/releases/latest"
 
@@ -1440,7 +1440,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("ISCmetrics — Ajustes")
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        self.setGeometry(200, 200, 440, 360)
+        self.setGeometry(200, 200, 460, 430)
         self._p = parent
         if parent:
             self.setPalette(parent.palette())
@@ -1486,8 +1486,18 @@ class SettingsDialog(QDialog):
         ins = self._p.get_input_style()
 
         g.addWidget(self._lbl("COM Port:", ls), 0, 0)
+        port_row = QHBoxLayout()
         self.combo_port = QComboBox(); self.combo_port.setStyleSheet(ins)
-        self._refresh_ports(); g.addWidget(self.combo_port, 0, 1)
+        self._refresh_ports()
+        port_row.addWidget(self.combo_port, stretch=1)
+        btn_refresh = QPushButton("⟳")
+        btn_refresh.setFixedWidth(28)
+        btn_refresh.setToolTip("Refresh COM ports")
+        btn_refresh.setStyleSheet(self._p.get_button_style())
+        btn_refresh.clicked.connect(self._refresh_ports)
+        port_row.addWidget(btn_refresh)
+        port_container = QWidget(); port_container.setLayout(port_row)
+        g.addWidget(port_container, 0, 1)
 
         g.addWidget(self._lbl("Baud Rate:", ls), 1, 0)
         self.input_baud = QLineEdit(str(self._p.settings.get("baud", rtt.DEFAULT_BAUD))); self.input_baud.setStyleSheet(ins)
@@ -1533,16 +1543,25 @@ class SettingsDialog(QDialog):
         self.input_alert_imb.setToolTip("Alert when max(Vmax-Vmin) across any module exceeds this value")
         g.addWidget(self.input_alert_imb, 9, 1)
 
-        btn = QPushButton("Apply & Close")
-        btn.setStyleSheet(self._p.get_button_style('accent'))
-        btn.clicked.connect(self.accept)
-        g.addWidget(btn, 10, 0, 1, 2)
+        # Separator line
+        sep = QFrame(); sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color:#333; margin-top:4px; margin-bottom:4px;")
+        g.addWidget(sep, 10, 0, 1, 2)
 
-        btn_cal = QPushButton("Calibrate Pedals...")
+        # Accept button (row 11)
+        btn = QPushButton("✔  Apply & Close")
+        btn.setStyleSheet(self._p.get_button_style('accent'))
+        btn.setToolTip("Save settings and close this dialog")
+        btn.clicked.connect(self.accept)
+        g.addWidget(btn, 11, 0, 1, 2)
+
+        # Calibrate pedals — separate row (row 12)
+        btn_cal = QPushButton("⚙  Calibrate Pedals…")
         btn_cal.setStyleSheet(self._p.get_button_style())
-        btn_cal.setToolTip("Launch the brake & APPS calibration wizard")
+        btn_cal.setToolTip("Launch the brake & APPS live calibration wizard (connects to car automatically)")
         btn_cal.clicked.connect(self._open_cal_wizard)
-        g.addWidget(btn_cal, 10, 0, 1, 2)
+        g.addWidget(btn_cal, 12, 0, 1, 2)
+
 
     # ── Marple password gate ──────────────────────────────────────────────────
 
@@ -1947,10 +1966,22 @@ class BrakeCalibrationWizard(QDialog):
         self._btn_next.setText("Start Sampling" if self._step < 3 else "Save & Apply")
 
     def _update_adc(self):
-        s = rtt.get_latest_data().get('snapshot', {})
-        self._a1.setText(str(s.get('apps1_raw', '---')))
-        self._a2.setText(str(s.get('apps2_raw', '---')))
-        self._brk.setText(str(s.get('brake_raw', '---')))
+        d = rtt.get_latest_data()
+        # Try snapshot sub-key first, then flat top-level (both formats used across versions)
+        s = d.get('snapshot') or d
+        a1  = s.get('apps1_raw')
+        a2  = s.get('apps2_raw')
+        brk = s.get('brake_raw')
+        if a1 is not None:
+            self._a1.setText(str(a1))
+            self._a2.setText(str(a2))
+            self._brk.setText(str(brk))
+            self._lbl_status.setText("🟢 Live data from car")
+        else:
+            self._a1.setText("---")
+            self._a2.setText("---")
+            self._brk.setText("---")
+            self._lbl_status.setText("⚠ Waiting for car data…")
 
     def _on_next(self):
         if self._step == 3:
@@ -2024,10 +2055,49 @@ class BrakeCalibrationWizard(QDialog):
 # These must live inside SettingsDialog, not BrakeCalibrationWizard.
 # We re-open SettingsDialog here using monkey-patching to avoid a full rewrite.
 def _sd_open_cal_wizard(self):
-    """Launch the BrakeCalibrationWizard; apply results immediately."""
+    """Launch the BrakeCalibrationWizard with live telemetry feed; apply results immediately."""
+    main = self._p
+    port = main.settings.get("port")
+    baud = int(main.settings.get("baud", 115200))
+
+    # If not already receiving, start a temporary live session for calibration
+    _started_for_cal = False
+    if not main.is_receiving and port:
+        import threading
+        rtt.new_data_flag = 0
+        bucket = rtt.create_bucket("CAL_WIZ", "calibration")
+        def _cal_worker():
+            try:
+                rtt.receive_data(bucket_id=bucket, piloto="CAL_WIZ", circuito="calibration",
+                                 port=port, baud=baud, use_influx=False, debug=False)
+            except Exception:
+                pass
+            finally:
+                main.is_receiving = False
+        main.rx_thread = threading.Thread(target=_cal_worker, daemon=True)
+        main.rx_thread.start()
+        main.is_receiving = True
+        _started_for_cal = True
+    elif not port:
+        from PyQt5.QtWidgets import QMessageBox
+        QMessageBox.warning(self, "No COM Port",
+            "No COM port is selected.\n"
+            "Select a port in Settings and try again, or start reception first.")
+        return
+
     wiz = BrakeCalibrationWizard(self._p)
-    if wiz.exec_():
-        self._p._apply_pedal_calibration(wiz.result_cal)
+    result = wiz.exec_()
+
+    # Stop the temporary session if we started it just for calibration
+    if _started_for_cal:
+        rtt.new_data_flag = -1
+        if main.rx_thread and main.rx_thread.is_alive():
+            main.rx_thread.join(timeout=1.5)
+        main.is_receiving = False
+
+    if result:
+        main._apply_pedal_calibration(wiz.result_cal)
+
 
 def _sd_on_marple_toggled(self, state: int):
     """Ask for the Marple API password whenever the checkbox is ticked on."""
@@ -2765,15 +2835,18 @@ class MainWindow(QMainWindow):
 
     def get_button_style(self, v: str = 'default') -> str:
         if v == 'accent':
-            bg, fg, br, hbg = ISC_GREEN, F1_DARK_BG, 'none', '#009a00'
+            bg, fg, br, hbg, hfg = ISC_GREEN, F1_DARK_BG, 'none', '#009a00', F1_DARK_BG
+        elif v == 'danger':
+            bg, fg, br, hbg, hfg = '#7f1d1d', F1_TEXT, 'none', '#dc2626', 'white'
         else:
-            bg, fg, br, hbg = F1_MID_BG, ISC_GREEN, f'1px solid {ISC_GREEN}', ISC_GREEN
+            # Solid filled dark button — fully filled background, green text
+            bg, fg, br, hbg, hfg = F1_PANEL_BG, ISC_GREEN, f'1px solid #2a2a2a', ISC_GREEN, F1_DARK_BG
         return f"""
             QPushButton {{ background:{bg}; color:{fg}; border:{br};
                            border-radius:3px; padding:5px 11px;
                            font-size:11px; font-weight:bold; }}
-            QPushButton:hover {{ background:{hbg}; color:{F1_DARK_BG}; }}
-            QPushButton:disabled {{ background:#222; color:#444; border:1px solid #333; }}
+            QPushButton:hover {{ background:{hbg}; color:{hfg}; }}
+            QPushButton:disabled {{ background:#1a1a1a; color:#444; border:1px solid #222; }}
         """
 
     @staticmethod
