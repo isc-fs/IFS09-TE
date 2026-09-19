@@ -69,7 +69,7 @@ except ImportError:
 # ══════════════════════════════════════════════════════════════════════════════
 #  VERSION  — patched automatically by GitHub Actions on each release tag
 # ══════════════════════════════════════════════════════════════════════════════
-APP_VERSION    = "2.3.0"
+APP_VERSION    = "2.9.0"
 _RELEASES_URL  = "https://api.github.com/repos/MrAndy5/ISCmetrics/releases/latest"
 _RELEASES_PAGE = "https://github.com/MrAndy5/ISCmetrics/releases/latest"
 
