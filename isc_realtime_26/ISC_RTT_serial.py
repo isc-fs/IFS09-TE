@@ -136,7 +136,42 @@ DEBUG_ENABLE_DEFAULT  = False
 # ================== GLOBALS (UI / STATUS) ==================
 data_str       = ""
 new_data_flag  = 0
-latest_data_dict: dict = {}
+latest_data_dict: dict = {
+    'acu_matrix': {
+        'voltages_mv': [[0] * 19 for _ in range(5)],  # 5 modules x 19 cells
+        'temps_c': [[float('nan')] * 38 for _ in range(5)],  # 5 modules x 38 NTCs
+        'fault_status': {
+            'fsm_state': 0,
+            'fault_reason': 0,
+            'fault_name': 'No Fault',
+            'offending_module': 0xFF,
+            'offending_cell_ntc': 0xFF,
+            'tripped_val': 0,
+            'err_bits': 0,
+            'latch_active': False,
+            'roll_counter': 0,
+            'last_update_ts': 0.0,
+        },
+        'last_v_update_ts': 0.0,
+        'last_t_update_ts': 0.0,
+    }
+}
+
+FAULT_REASON_NAMES: Dict[int, str] = {
+    0: "No Fault",
+    1: "CellUnderVoltage",
+    2: "CellOverVoltage",
+    3: "CellOverTemp",
+    4: "CellUnderTemp",
+    5: "PrechargeTimeout",
+    6: "CurrentSensorError",
+    7: "DischargeOverCurrent",
+    8: "ChargeOverCurrent",
+    9: "ChargeUnderVoltage",
+    10: "ChargeOverVoltage",
+    11: "ChargerDisconnect",
+    12: "SafetyLoopOpen",
+}
 
 _status: dict = {"badge": "STALE", "reason": "inicio", "ts": 0}
 _receiver_status: dict = {"hw_status": "OK", "last_update": 0.0}
@@ -201,6 +236,8 @@ class SerialCSVLogger:
         # ── GPS  [snap bytes 82-95] ──────────────────────────────────────────
         "gps_lat_deg", "gps_lon_deg", "gps_speed_kmh", "gps_course_deg",
         "gps_sats", "gps_has_fix",
+        # ── Inverter FOC & Torque Metrics [snap bytes 96-101] ────────────────
+        "inv_torque_est_nm", "inv_torque_max_feas", "inv_subfault_bits",
         # ── IMU (simulated or parsed from snap bytes) ─────────────────────────
         "imu_ax_g", "imu_ay_g", "imu_az_g",
         "imu_gx_dps", "imu_gy_dps", "imu_gz_dps",
@@ -268,6 +305,10 @@ class SerialCSVLogger:
             s.get('gps_speed_kmh', "") if s.get('gps_has_fix', 0) else "",
             s.get('gps_course_deg',"") if s.get('gps_has_fix', 0) else "",
             s.get('gps_sats',        0), s.get('gps_has_fix', 0),
+            # Inverter FOC & Torque Metrics [bytes 96-101]
+            s.get('inv_torque_est_nm',   0),
+            s.get('inv_torque_max_feas', 0.0),
+            s.get('inv_subfault_bits',   0),
             # IMU columns
             s.get('imu_ax_g',            0.0), s.get('imu_ay_g',         0.0), s.get('imu_az_g',            0.0),
             s.get('imu_gx_dps',          0.0), s.get('imu_gy_dps',       0.0), s.get('imu_gz_dps',          0.0),
@@ -576,7 +617,7 @@ def _decode_slow_snapshot(data: bytes, seq: int) -> dict:
     }
 
 
-_SNAP_FMT_FLAT = struct.Struct("<I H B H H H H B B B B B H B 5H 5H h h h 5h B B B H H H H i i i 20x")
+_SNAP_FMT_FLAT = struct.Struct("<I H B H H H H B B B B B H B 5H 5H h h h 5h B B B H H H H i i i i i H H B B h h H")
 
 def _decode_flat_snapshot(data: bytes, seq: int) -> dict:
     if len(data) < 102:
@@ -593,12 +634,24 @@ def _decode_flat_snapshot(data: bytes, seq: int) -> dict:
     # Always read raw; scale only when has_fix == 1 to avoid stale position
     # being shown as live after the fix drops.  If fix is 0 the position
     # registers hold the last valid values — intentional ECU behaviour.
-    _gps_has_fix    = data[95]
-    _gps_lat_raw    = struct.unpack_from('<i', data, 82)[0]   # int32 LE degrees × 1e7
-    _gps_lon_raw    = struct.unpack_from('<i', data, 86)[0]   # int32 LE degrees × 1e7
-    _gps_spd_raw    = struct.unpack_from('<H', data, 90)[0]   # uint16 LE km/h × 100
-    _gps_crs_raw    = struct.unpack_from('<H', data, 92)[0]   # uint16 LE deg × 100
-    _gps_sats       = data[94]
+    _gps_lat_raw    = unpacked[42]   # int32 LE degrees × 1e7
+    _gps_lon_raw    = unpacked[43]   # int32 LE degrees × 1e7
+    _gps_spd_raw    = unpacked[44]   # uint16 LE km/h × 100
+    _gps_crs_raw    = unpacked[45]   # uint16 LE deg × 100
+    _gps_sats       = unpacked[46]
+    _gps_has_fix    = unpacked[47]
+
+    # ── Inverter FOC feedback & fault diagnostics [bytes 96..101] ─────────────
+    inv_tq_est_nm   = unpacked[48]   # int16 LE 1 Nm/LSB
+    inv_tq_feas_raw = unpacked[49]   # int16 LE 0.1 Nm/LSB
+    inv_subfault    = unpacked[50]   # uint16 LE: PwrStg(9) | EMCtrl_FOC(6)<<9 | DEM_Active(1)<<15
+
+    inv_torque_est_nm   = int(inv_tq_est_nm)
+    inv_torque_max_feas = round(inv_tq_feas_raw * 0.1, 1)
+    inv_subfault_bits   = int(inv_subfault)
+    pwrstg_bitstate     = inv_subfault_bits & 0x01FF
+    emctrl_foc          = (inv_subfault_bits >> 9) & 0x003F
+    dem_active          = 1 if (inv_subfault_bits & 0x8000) else 0
 
     return {
         'tick_ms':            unpacked[0],
@@ -627,7 +680,7 @@ def _decode_flat_snapshot(data: bytes, seq: int) -> dict:
         'last_vconfig_tick':  unpacked[33],
         'inv_error':          unpacked[34],
         'dem_code':           unpacked[34],  # Alias for inv_error (DEM_Code from EMC_TX_STATE_2)
-        'emctrl_foc_bitstate': 0,
+        'emctrl_foc_bitstate': emctrl_foc,
         'inv_dc_bus_V':       unpacked[35],
         # DBC EMC_TX_STATE_5 (0x464): physical_degC = raw_byte - 50  (scale=1, offset=-50)
         'inv_temp_motor1':    unpacked[36] - 50,  # EMachine_Temp_1_degC (Sensor 1, disconnected → 205°C)
@@ -651,6 +704,14 @@ def _decode_flat_snapshot(data: bytes, seq: int) -> dict:
         'gps_lon_deg1e7':     _gps_lon_raw,
         'gps_speed_kmh_x100': _gps_spd_raw,
         'gps_course_deg_x100':_gps_crs_raw,
+
+        # ── Inverter FOC & Torque Metrics [bytes 96..101] ────────────────────
+        'inv_torque_est_nm':   inv_torque_est_nm,
+        'inv_torque_max_feas': inv_torque_max_feas,
+        'inv_subfault_bits':   inv_subfault_bits,
+        'pwrstg_bitstate':     pwrstg_bitstate,
+        'emctrl_foc':          emctrl_foc,
+        'dem_active':          dem_active,
     }
 
 
@@ -753,6 +814,123 @@ def get_latest_data(data_id: Optional[str] = None):
     if data_id:
         return latest_data_dict.get(data_id, {})
     return latest_data_dict.copy()
+
+def get_acu_matrix() -> dict:
+    """Return current ACU diagnostic matrix (voltages 5x19, temps 5x38, fault_status)."""
+    return latest_data_dict.get('acu_matrix', {})
+
+def unpack_ams_diag_status(data: bytes) -> dict:
+    """
+    Decode CAN 0x4A3 (AMS_diag_status, 8 bytes).
+    Layout:
+      [0]   fault_reason   uint8
+      [1]   fault_module   uint8 (0..4, 0xFF=none)
+      [2]   offending_idx  uint8 (cell 0..18 / ntc 0..37, 0xFF=none)
+      [3..4] err_bits      uint16 LE (bit 0=latch, 1..5=t_disc, 6..10=c_open, 11..15=tap)
+      [5..6] tripped_val   uint16 LE (mV or °C)
+      [7]   roll_counter   uint8
+    """
+    if len(data) < 8:
+        return {}
+    reason = data[0]
+    fault_mod = data[1]
+    fault_idx = data[2]
+    err_bits = struct.unpack_from('<H', data, 3)[0]
+    tripped_val = struct.unpack_from('<H', data, 5)[0]
+    roll_counter = data[7]
+    latch_active = bool(err_bits & 0x0001)
+
+    status = {
+        'fsm_state':          latest_data_dict.get('snapshot', {}).get('ams_fsm_state', 0),
+        'fault_reason':       reason,
+        'fault_name':         FAULT_REASON_NAMES.get(reason, f"Fault_{reason}"),
+        'offending_module':   fault_mod if fault_mod < 5 else 0xFF,
+        'offending_cell_ntc': fault_idx,
+        'tripped_val':        tripped_val,
+        'err_bits':           err_bits,
+        'latch_active':       latch_active,
+        'roll_counter':       roll_counter,
+        'last_update_ts':     time.time(),
+    }
+    latest_data_dict.setdefault('acu_matrix', {})['fault_status'] = status
+    return status
+
+def unpack_ams_cell_v_mux(data: bytes) -> bool:
+    """
+    Decode CAN 0x4B0 (AMS_diag_cell_v_mux, 8 bytes).
+    Layout:
+      [0]   module (0..4)
+      [1]   chunk (0..6)
+      [2..3] cell v0 (uint16 LE, mV, 0xFFFF=pad)
+      [4..5] cell v1 (uint16 LE, mV, 0xFFFF=pad)
+      [6..7] cell v2 (uint16 LE, mV, 0xFFFF=pad)
+    """
+    if len(data) < 8:
+        return False
+    mod = data[0]
+    chunk = data[1]
+    if mod >= 5 or chunk >= 7:
+        return False
+
+    v0, v1, v2 = struct.unpack_from('<HHH', data, 2)
+    acu = latest_data_dict.setdefault('acu_matrix', {})
+    vm = acu.setdefault('voltages_mv', [[0] * 19 for _ in range(5)])
+
+    base_c = chunk * 3
+    if base_c < 19 and v0 != 0xFFFF:
+        vm[mod][base_c] = v0
+    if base_c + 1 < 19 and v1 != 0xFFFF:
+        vm[mod][base_c + 1] = v1
+    if base_c + 2 < 19 and v2 != 0xFFFF:
+        vm[mod][base_c + 2] = v2
+
+    acu['last_v_update_ts'] = time.time()
+    return True
+
+def unpack_ams_cell_t_mux(data: bytes) -> bool:
+    """
+    Decode CAN 0x4B1 (AMS_diag_cell_t_mux, 8 bytes).
+    Layout:
+      [0]   module (0..4)
+      [1]   chunk (0..6)
+      [2..7] 6 x int8 readings (°C, 0x80=-128=pad)
+    """
+    if len(data) < 8:
+        return False
+    mod = data[0]
+    chunk = data[1]
+    if mod >= 5 or chunk >= 7:
+        return False
+
+    temps = struct.unpack_from('<6b', data, 2)
+    acu = latest_data_dict.setdefault('acu_matrix', {})
+    tm = acu.setdefault('temps_c', [[float('nan')] * 38 for _ in range(5)])
+
+    base_ntc = chunk * 6
+    for i in range(6):
+        idx = base_ntc + i
+        if idx < 38:
+            raw_t = temps[i]
+            if raw_t != -128:  # 0x80 pad
+                tm[mod][idx] = float(raw_t)
+
+    acu['last_t_update_ts'] = time.time()
+    return True
+
+def unpack_can_frame(can_id: int, data: bytes) -> bool:
+    """
+    Dispatches CAN frames to diagnostic unpackers.
+    Returns True if frame was recognized and unpacked.
+    """
+    if can_id == 0x4A3:
+        unpack_ams_diag_status(data)
+        return True
+    elif can_id == 0x4B0:
+        return unpack_ams_cell_v_mux(data)
+    elif can_id == 0x4B1:
+        return unpack_ams_cell_t_mux(data)
+    return False
+
 
 
 # ================== POST-RACE DATA INJECTION ==================
@@ -1110,6 +1288,12 @@ def receive_data(bucket_id: str,
         'inv_rpm':            0,
         'inv_speed_actual':   0,
         'inv_current_actual': 0,
+        'inv_torque_est_nm':   0,
+        'inv_torque_max_feas': 0.0,
+        'inv_subfault_bits':   0,
+        'pwrstg_bitstate':     0,
+        'emctrl_foc':          0,
+        'dem_active':          0,
         'imu_ax_g':           0.0,
         'imu_ay_g':           0.0,
         'imu_az_g':           0.0,

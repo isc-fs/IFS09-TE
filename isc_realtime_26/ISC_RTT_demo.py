@@ -863,6 +863,13 @@ class DemoDataGenerator:
             "inv_rpm":            int(motor_rpm),
             "inv_speed_actual":   int(self.v * 3.6),   # km/h
             "inv_current_actual": int(self.motor_I),
+            # Torque & diagnostic expansion [bytes 96..101]
+            "inv_torque_est_nm":   int((self.thr / 100.0) * MOTOR_MAX_TORQUE),
+            "inv_torque_max_feas": round(MOTOR_MAX_TORQUE * min(1.0, max(0.0, (dc_bus_v - PACK_V_DEPLETED) / max(1.0, PACK_V_FULL - PACK_V_DEPLETED))), 1),
+            "inv_subfault_bits":   0,
+            "pwrstg_bitstate":     0,
+            "emctrl_foc":          0,
+            "dem_active":          0,
             # Simulated IMU values in snapshot
             "imu_ax_g":           self.imu_ax_g,
             "imu_ay_g":           self.imu_ay_g,
@@ -912,6 +919,35 @@ class DemoDataGenerator:
             mod.max_cell_mv    = snap["vmax_modulo"][i]
             mod.max_temp_c     = float(snap["temp_max_modulo"][i])
             mod.last_update_ts = time.time()
+
+        # Populate simulated ACU diagnostic matrix (95 cells, 190 NTCs)
+        v_matrix = []
+        t_matrix = []
+        for m in range(NUM_MODULES):
+            vm = snap["vmin_modulo"][m]
+            vx = snap["vmax_modulo"][m]
+            v_matrix.append([int(vm + (vx - vm) * (c / 18.0)) for c in range(CELLS_PER_MODULE)])
+            t_base = float(snap["temp_max_modulo"][m])
+            t_matrix.append([round(t_base - 0.1 * (n % 10), 1) for n in range(38)])
+
+        rtt.latest_data_dict["acu_matrix"] = {
+            'voltages_mv': v_matrix,
+            'temps_c':     t_matrix,
+            'fault_status': {
+                'fsm_state':          snap.get('ams_fsm_state', 3),
+                'fault_reason':       0,
+                'fault_name':         'No Fault',
+                'offending_module':   0xFF,
+                'offending_cell_ntc': 0xFF,
+                'tripped_val':        0,
+                'err_bits':           0,
+                'latch_active':       False,
+                'roll_counter':       snap.get('seq', 0) & 0xFF,
+                'last_update_ts':     time.time(),
+            },
+            'last_v_update_ts': time.time(),
+            'last_t_update_ts': time.time(),
+        }
 
         # Trigger log line in ISCmetrics
         rtt.new_data_flag = 1
