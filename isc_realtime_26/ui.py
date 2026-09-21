@@ -217,9 +217,9 @@ def decode_inverter_errors(error_code: int, state_code: int = 0) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  COLOUR SCHEME  (ISC Vibrant Racing Green / Grafana High-Contrast Dark)
+#  COLOUR SCHEME  (ISC Green / Grafana dark)
 # ══════════════════════════════════════════════════════════════════════════════
-ISC_GREEN   = '#00c853'          # Vibrant electric racing green (8.5:1 contrast against #111111)
+ISC_GREEN   = '#008000'
 F1_DARK_BG  = '#111111'
 F1_MID_BG   = '#1a1a1a'
 F1_PANEL_BG = '#222222'
@@ -834,7 +834,7 @@ class PedalWidget(QWidget):
 
         # Raw
         p.setPen(QColor(F1_MUTED))
-        p.setFont(QFont("Segoe UI", 8.5))
+        p.setFont(QFont("Segoe UI", 9))
         p.drawText(0, by + bh + 26, w, 16, Qt.AlignCenter, f"raw {self._raw}")
         p.end()
 
@@ -910,7 +910,7 @@ class GCircleWidget(QWidget):
 
         # Axis labels
         p.setPen(QColor(F1_MUTED))
-        p.setFont(QFont("Segoe UI", 8.5, QFont.Bold))
+        p.setFont(QFont("Segoe UI", 9, QFont.Bold))
         p.drawText(cx - r, cy + r + 3, r * 2, 14, Qt.AlignCenter, "← LAT →")
         p.end()
 
@@ -1119,7 +1119,7 @@ class GPSTrackWidget(QWidget):
         p.setFont(QFont("Courier New", 8, QFont.Bold))
 
         if self._has_fix:
-            fix_dot_c = QColor('#00c853')
+            fix_dot_c = QColor(ISC_GREEN)
             spd_txt   = f"  {self._cur_spd:.1f} km/h"
             sat_txt   = f"  {self._sats} sats"
             lat_txt   = f"  {self._lat:+.5f}°"
@@ -1192,7 +1192,7 @@ class ModuleBarWidget(QWidget):
 
         # Module label
         p.setPen(QColor(ISC_GREEN))
-        p.setFont(QFont("Segoe UI", 9.5, QFont.Bold))
+        p.setFont(QFont("Segoe UI", 10, QFont.Bold))
         p.drawText(2, 0, lw, h, Qt.AlignVCenter | Qt.AlignLeft, f"MOD {self._id}")
 
         # Track
@@ -1220,7 +1220,7 @@ class ModuleBarWidget(QWidget):
 
         # Value text
         p.setPen(QColor(F1_TEXT))
-        p.setFont(QFont("Consolas", 9.5, QFont.Bold))
+        p.setFont(QFont("Consolas", 10, QFont.Bold))
         p.drawText(bx + bw + 6, 0, vw, h, Qt.AlignVCenter | Qt.AlignLeft,
                    f"{self._val_lo:.0f}–{self._val_hi:.0f} {self._unit}")
         p.end()
@@ -1501,7 +1501,7 @@ class SettingsDialog(QDialog):
                 border: 1.5px solid {ISC_GREEN};
             }}
             QCheckBox::indicator:checked {{
-                border: 1.5px solid #00c853;
+                border: 1.5px solid {ISC_GREEN};
                 background-color: {F1_MID_BG};
                 image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMiIgaGVpZ2h0PSIxMiIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMwMGM4NTMiIHN0cm9rZS13aWR0aD0iNCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cG9seWxpbmUgcG9pbnRzPSIyMCA2IDkgMTcgNCAxMiI+PC9wb2x5bGluZT48L3N2Zz4=);
             }}
