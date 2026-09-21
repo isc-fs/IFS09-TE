@@ -217,18 +217,20 @@ def decode_inverter_errors(error_code: int, state_code: int = 0) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  COLOUR SCHEME  (ISC Green / Grafana dark)
+#  COLOUR SCHEME  (ISC Vibrant Racing Green / Grafana High-Contrast Dark)
 # ══════════════════════════════════════════════════════════════════════════════
-ISC_GREEN   = '#008000'
+ISC_GREEN   = '#00c853'          # Vibrant electric racing green (8.5:1 contrast against #111111)
 F1_DARK_BG  = '#111111'
 F1_MID_BG   = '#1a1a1a'
 F1_PANEL_BG = '#222222'
-F1_TEXT     = '#e0e0e0'
+F1_TEXT     = '#f1f5f9'          # Crisp high-contrast bright text
+F1_MUTED    = '#94a3b8'          # Slate-400 for highly legible secondary labels
 F1_ACCENT   = ISC_GREEN          # backward-compat alias
-F1_WARNING  = '#f0b429'
-F1_ERROR    = '#ef4444'
-F1_BLUE     = '#3b82f6'
-F1_PURPLE   = '#8b5cf6'
+F1_WARNING  = '#f59e0b'          # Amber
+F1_ERROR    = '#ef4444'          # Red
+F1_BLUE     = '#38bdf8'          # Sky blue
+F1_PURPLE   = '#a855f7'          # Purple
+
 
 # ── Marple upload password (SHA-256 of 'ISC_telemetry_2026') ─────────────────
 _MARPLE_PASSWORD_HASH = hashlib.sha256(b"ISC_telemetry_2026").hexdigest()
@@ -631,11 +633,11 @@ class MplCanvas(QWidget):
         self._ax = fig.add_subplot(111)
         self._line, = self._ax.plot([], [], color=color, linewidth=1.4, antialiased=True)
         self._ax.set_facecolor(F1_DARK_BG)
-        self._ax.set_title(title, color=color, fontsize=8, fontweight='bold', pad=2)
-        self._ax.tick_params(labelsize=7.5, colors='#ffffff' if F1_TEXT == '#e0e0e0' else '#111111')
-        self._ax.grid(True, color='#444444' if F1_TEXT == '#e0e0e0' else '#cccccc', alpha=0.35)
+        self._ax.set_title(title, color=color, fontsize=10, fontweight='bold', pad=3)
+        self._ax.tick_params(labelsize=8.5, colors='#ffffff' if F1_TEXT == '#f1f5f9' else '#111111')
+        self._ax.grid(True, color='#444444' if F1_TEXT == '#f1f5f9' else '#cccccc', alpha=0.35)
         for s in self._ax.spines.values():
-            s.set_color('#555555' if F1_TEXT == '#e0e0e0' else '#aaaaaa')
+            s.set_color('#555555' if F1_TEXT == '#f1f5f9' else '#aaaaaa')
 
         canvas = FigureCanvas(fig)
         lay = QVBoxLayout(self)
@@ -645,6 +647,8 @@ class MplCanvas(QWidget):
 
     def update_plot(self, value: float) -> None:
         self._history.append(float(value))
+        if not self.isVisible():
+            return
         y = list(self._history)
         x = list(range(len(y)))
         self._line.set_data(x, y)
@@ -662,37 +666,41 @@ class MplCanvas(QWidget):
 #  METRIC CARD
 # ══════════════════════════════════════════════════════════════════════════════
 class MetricCard(QFrame):
-    """Grafana-style metric tile: title, large value, unit, alert highlight."""
+    """Grafana-style metric tile: bold title, prominent 22px value, crisp unit, alert highlight."""
     def __init__(self, title: str, unit: str = "", color: str = ISC_GREEN, parent=None):
         super().__init__(parent)
         self._color   = color
         self._alerting = False
+        self._cur_val  = "—"
         self._set_border(color)
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(8, 5, 8, 5)
-        v.setSpacing(1)
+        v.setContentsMargins(10, 6, 10, 6)
+        v.setSpacing(2)
 
         self._title = QLabel(title)
         self._title.setAlignment(Qt.AlignCenter)
-        self._title.setStyleSheet(f"color:{color}; font-size:9px; font-weight:bold; background:transparent; border:none;")
+        self._title.setStyleSheet(f"color:{color}; font-size:11px; font-weight:bold; background:transparent; border:none;")
 
         self._value = QLabel("—")
         self._value.setAlignment(Qt.AlignCenter)
-        self._value.setStyleSheet(f"color:{F1_TEXT}; font-size:19px; font-weight:bold; background:transparent; border:none;")
+        self._value.setStyleSheet(f"color:{F1_TEXT}; font-size:22px; font-weight:bold; background:transparent; border:none;")
 
         self._unit = QLabel(unit)
         self._unit.setAlignment(Qt.AlignCenter)
-        self._unit.setStyleSheet("color:#555; font-size:8px; background:transparent; border:none;")
+        self._unit.setStyleSheet(f"color:{F1_MUTED}; font-size:10.5px; font-weight:600; background:transparent; border:none;")
 
         v.addWidget(self._title)
         v.addWidget(self._value)
         v.addWidget(self._unit)
 
     def _set_border(self, color: str) -> None:
-        self.setStyleSheet(f"QFrame {{ background:{F1_PANEL_BG}; border:1px solid {color}; border-radius:3px; }}")
+        self.setStyleSheet(f"QFrame {{ background:{F1_PANEL_BG}; border:1.5px solid {color}; border-radius:4px; }}")
 
     def set_value(self, text: str) -> None:
+        if self._cur_val == text:
+            return
+        self._cur_val = text
         self._value.setText(text)
 
     def set_alert(self, active: bool) -> None:
@@ -700,8 +708,8 @@ class MetricCard(QFrame):
             return
         self._alerting = active
         col = F1_ERROR if active else self._color
-        self.setStyleSheet(f"QFrame {{ background:{F1_PANEL_BG}; border:2px solid {col}; border-radius:3px; }}")
-        self._title.setStyleSheet(f"color:{col}; font-size:9px; font-weight:bold; background:transparent; border:none;")
+        self.setStyleSheet(f"QFrame {{ background:{F1_PANEL_BG}; border:2px solid {col}; border-radius:4px; }}")
+        self._title.setStyleSheet(f"color:{col}; font-size:11px; font-weight:bold; background:transparent; border:none;")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -715,8 +723,12 @@ class RPMGauge(QWidget):
         self.setMinimumSize(180, 180)
 
     def set_rpm(self, rpm: float) -> None:
-        self._rpm = max(0.0, min(float(rpm), RPM_MAX))
-        self.update()
+        new_rpm = max(0.0, min(float(rpm), RPM_MAX))
+        if abs(self._rpm - new_rpm) < 1.0:
+            return
+        self._rpm = new_rpm
+        if self.isVisible():
+            self.update()
 
     def paintEvent(self, _ev):
         w, h  = self.width(), self.height()
@@ -750,11 +762,11 @@ class RPMGauge(QWidget):
 
         # RPM text
         p.setPen(QColor(F1_TEXT))
-        p.setFont(QFont("Arial", max(10, r // 4), QFont.Bold))
+        p.setFont(QFont("Segoe UI", max(11, r // 4), QFont.Bold))
         p.drawText(cx - r, cy - r // 3, side, side // 2, Qt.AlignCenter, f"{int(self._rpm):,}")
 
         p.setPen(QColor(col))
-        p.setFont(QFont("Arial", max(7, r // 9)))
+        p.setFont(QFont("Segoe UI", max(8, r // 9), QFont.Bold))
         p.drawText(cx - r, cy + r // 6, side, r // 2, Qt.AlignCenter, "RPM")
         p.end()
 
@@ -773,9 +785,13 @@ class PedalWidget(QWidget):
         self.setMinimumSize(90, 180)
 
     def set_value(self, normalized: float, raw: int = 0) -> None:
-        self._norm = max(0.0, min(1.0, float(normalized)))
+        new_norm = max(0.0, min(1.0, float(normalized)))
+        if abs(self._norm - new_norm) < 0.005 and self._raw == raw:
+            return
+        self._norm = new_norm
         self._raw  = raw
-        self.update()
+        if self.isVisible():
+            self.update()
 
     def paintEvent(self, _ev):
         w, h = self.width(), self.height()
@@ -808,17 +824,17 @@ class PedalWidget(QWidget):
 
         # Label (top)
         p.setPen(QColor(self._color))
-        p.setFont(QFont("Arial", 8, QFont.Bold))
+        p.setFont(QFont("Segoe UI", 9, QFont.Bold))
         p.drawText(0, 0, w, by, Qt.AlignCenter | Qt.AlignVCenter, self._label)
 
         # Percentage
         p.setPen(QColor(F1_TEXT))
-        p.setFont(QFont("Arial", 13, QFont.Bold))
+        p.setFont(QFont("Segoe UI", 13, QFont.Bold))
         p.drawText(0, by + bh + 4, w, 22, Qt.AlignCenter, f"{int(self._norm * 100)}%")
 
         # Raw
-        p.setPen(QColor('#555'))
-        p.setFont(QFont("Arial", 7))
+        p.setPen(QColor(F1_MUTED))
+        p.setFont(QFont("Segoe UI", 8.5))
         p.drawText(0, by + bh + 26, w, 16, Qt.AlignCenter, f"raw {self._raw}")
         p.end()
 
@@ -841,7 +857,8 @@ class GCircleWidget(QWidget):
         self._gx = g_lat
         self._gy = g_long
         self._trail.append((g_lat, g_long))
-        self.update()
+        if self.isVisible():
+            self.update()
 
     def paintEvent(self, _ev):
         w, h = self.width(), self.height()
@@ -851,19 +868,19 @@ class GCircleWidget(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
 
         # Outer ring
-        p.setPen(QPen(QColor('#333'), 1))
+        p.setPen(QPen(QColor('#3f3f46'), 1.5))
         p.setBrush(QBrush(QColor(F1_PANEL_BG)))
         p.drawEllipse(cx - r, cy - r, r * 2, r * 2)
 
         # Inner rings (1 G, 2 G)
         for frac in (1/3, 2/3):
             rr = int(r * frac)
-            p.setPen(QPen(QColor('#2a2a2a'), 1, Qt.DashLine))
+            p.setPen(QPen(QColor('#2e2e34'), 1, Qt.DashLine))
             p.setBrush(Qt.NoBrush)
             p.drawEllipse(cx - rr, cy - rr, rr * 2, rr * 2)
 
         # Cross-hairs
-        p.setPen(QPen(QColor('#2a2a2a'), 1))
+        p.setPen(QPen(QColor('#2e2e34'), 1))
         p.drawLine(cx - r, cy, cx + r, cy)
         p.drawLine(cx, cy - r, cx, cy + r)
 
@@ -892,8 +909,8 @@ class GCircleWidget(QWidget):
         p.drawEllipse(dot_x - 6, dot_y - 6, 12, 12)
 
         # Axis labels
-        p.setPen(QColor('#444'))
-        p.setFont(QFont("Arial", 7))
+        p.setPen(QColor(F1_MUTED))
+        p.setFont(QFont("Segoe UI", 8.5, QFont.Bold))
         p.drawText(cx - r, cy + r + 3, r * 2, 14, Qt.AlignCenter, "← LAT →")
         p.end()
 
@@ -967,7 +984,8 @@ class GPSTrackWidget(QWidget):
                         self._trail.append((x, y))
                 else:
                     self._trail.append((x, y))
-        self.update()   # trigger paintEvent
+        if self.isVisible():
+            self.update()   # trigger paintEvent
 
     def reset_track(self) -> None:
         """Clear accumulated trail (use when starting a new session)."""
@@ -1147,9 +1165,14 @@ class ModuleBarWidget(QWidget):
         self.setFixedHeight(32)
 
     def set_values(self, lo: float, hi: float) -> None:
-        self._val_lo = float(lo)
-        self._val_hi = float(hi)
-        self.update()
+        flo = float(lo)
+        fhi = float(hi)
+        if abs(self._val_lo - flo) < 0.5 and abs(self._val_hi - fhi) < 0.5:
+            return
+        self._val_lo = flo
+        self._val_hi = fhi
+        if self.isVisible():
+            self.update()
 
     def _frac(self, v: float) -> float:
         span = self._hi_range - self._lo_range
@@ -1160,16 +1183,16 @@ class ModuleBarWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
 
-        lw   = 58
-        vw   = 90
+        lw   = 62
+        vw   = 100
         bx   = lw + 6
         bw   = w - bx - vw - 4
-        bh   = 12
+        bh   = 13
         by   = (h - bh) // 2
 
         # Module label
         p.setPen(QColor(ISC_GREEN))
-        p.setFont(QFont("Arial", 8, QFont.Bold))
+        p.setFont(QFont("Segoe UI", 9.5, QFont.Bold))
         p.drawText(2, 0, lw, h, Qt.AlignVCenter | Qt.AlignLeft, f"MOD {self._id}")
 
         # Track
@@ -1197,7 +1220,7 @@ class ModuleBarWidget(QWidget):
 
         # Value text
         p.setPen(QColor(F1_TEXT))
-        p.setFont(QFont("Courier New", 8))
+        p.setFont(QFont("Consolas", 9.5, QFont.Bold))
         p.drawText(bx + bw + 6, 0, vw, h, Qt.AlignVCenter | Qt.AlignLeft,
                    f"{self._val_lo:.0f}–{self._val_hi:.0f} {self._unit}")
         p.end()
@@ -1279,10 +1302,14 @@ class ChannelListWidget(QListWidget):
         self.setStyleSheet(f"""
             QListWidget {{
                 background: {F1_PANEL_BG}; color: {F1_TEXT};
-                border: 1px solid #333; font-size: 10px;
+                border: 1px solid #3f3f46; font-size: 11px; font-weight: 500;
+                border-radius: 4px; padding: 4px;
             }}
-            QListWidget::item:selected {{ background: {ISC_GREEN}; color: {F1_DARK_BG}; }}
-            QListWidget::item:hover    {{ background: #2a2a2a; }}
+            QListWidget::item {{
+                padding: 4px 6px; border-radius: 2px;
+            }}
+            QListWidget::item:selected {{ background: {ISC_GREEN}; color: #000000; font-weight: bold; }}
+            QListWidget::item:hover    {{ background: #2a2a30; }}
         """)
         for key, (label, unit) in SNAPSHOT_CHANNELS.items():
             display = f"{label}  [{unit}]" if unit else label
@@ -1313,19 +1340,19 @@ class DroppablePlotPanel(QFrame):
         self._border_idle()
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.setSpacing(2)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(3)
 
         # Header
         hdr = QHBoxLayout()
         self._title_lbl = QLabel(f"Drop channel here  (panel {idx})")
-        self._title_lbl.setStyleSheet("color:#444; font-size:9px; background:transparent; border:none;")
+        self._title_lbl.setStyleSheet("color:#94a3b8; font-size:11px; font-weight:bold; background:transparent; border:none;")
         hdr.addWidget(self._title_lbl)
         hdr.addStretch()
         btn_clr = QPushButton("✕")
-        btn_clr.setFixedSize(17, 17)
+        btn_clr.setFixedSize(18, 18)
         btn_clr.setStyleSheet(
-            f"QPushButton {{ background:#2a2a2a; color:#666; border:none; font-size:9px; border-radius:2px; }}"
+            f"QPushButton {{ background:#2a2a30; color:#94a3b8; border:none; font-size:10px; font-weight:bold; border-radius:2px; }}"
             f"QPushButton:hover {{ background:{F1_ERROR}; color:white; }}"
         )
         btn_clr.clicked.connect(self.clear_channel)
@@ -1336,19 +1363,19 @@ class DroppablePlotPanel(QFrame):
         fig = Figure(figsize=(3, 1.4), tight_layout=True)
         fig.patch.set_facecolor(F1_PANEL_BG)
         self._ax = fig.add_subplot(111)
-        self._line, = self._ax.plot([], [], color=ISC_GREEN, linewidth=1.1)
+        self._line, = self._ax.plot([], [], color=ISC_GREEN, linewidth=1.2)
         self._ax.set_facecolor(F1_DARK_BG)
-        self._ax.tick_params(labelsize=7.5, colors='#ffffff' if F1_TEXT == '#e0e0e0' else '#111111')
-        self._ax.grid(True, color='#444444' if F1_TEXT == '#e0e0e0' else '#cccccc', alpha=0.35)
+        self._ax.tick_params(labelsize=8.5, colors='#ffffff' if F1_TEXT == '#f1f5f9' else '#111111')
+        self._ax.grid(True, color='#444444' if F1_TEXT == '#f1f5f9' else '#cccccc', alpha=0.35)
         for s in self._ax.spines.values():
-            s.set_color('#555555' if F1_TEXT == '#e0e0e0' else '#aaaaaa')
+            s.set_color('#555555' if F1_TEXT == '#f1f5f9' else '#aaaaaa')
         self._canvas = FigureCanvas(fig)
         lay.addWidget(self._canvas)
 
         # Current value
         self._val_lbl = QLabel("—")
         self._val_lbl.setAlignment(Qt.AlignCenter)
-        self._val_lbl.setStyleSheet(f"color:{ISC_GREEN}; font-size:15px; font-weight:bold; background:transparent; border:none;")
+        self._val_lbl.setStyleSheet(f"color:{ISC_GREEN}; font-size:16px; font-weight:bold; background:transparent; border:none;")
         lay.addWidget(self._val_lbl)
 
     # ── drag-drop events ──────────────────────────────────────────────────────
@@ -1366,9 +1393,9 @@ class DroppablePlotPanel(QFrame):
         ev.acceptProposedAction()
 
     def _border_idle(self):
-        self.setStyleSheet(f"QFrame {{ background:{F1_PANEL_BG}; border:1px dashed #333; border-radius:4px; }}")
+        self.setStyleSheet(f"QFrame {{ background:{F1_PANEL_BG}; border:1px dashed #3f3f46; border-radius:4px; }}")
 
-    # ── assignment ────────────────────────────────────────────────────────────
+    # ── assignment ────────────────────────────────────────────────────
     def assign_channel(self, key: str) -> None:
         self._channel = key
         label, unit = SNAPSHOT_CHANNELS.get(key, (key, ''))
@@ -1376,25 +1403,25 @@ class DroppablePlotPanel(QFrame):
         title_txt = f"{label}  [{unit}]" if unit else label
         self._title_lbl.setText(title_txt)
         self._title_lbl.setStyleSheet(
-            f"color:{ISC_GREEN}; font-size:9px; font-weight:bold; background:transparent; border:none;")
+            f"color:{ISC_GREEN}; font-size:11px; font-weight:bold; background:transparent; border:none;")
         # Update y-axis label with unit
-        self._ax.set_ylabel(unit, fontsize=6, color='#555')
+        self._ax.set_ylabel(unit, fontsize=8, color=F1_MUTED)
         self._history = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
 
     def clear_channel(self) -> None:
         self._channel = None
         self._unit = ''
         self._title_lbl.setText(f"Drop channel here  (panel {self._idx})")
-        self._title_lbl.setStyleSheet("color:#444; font-size:9px; background:transparent; border:none;")
+        self._title_lbl.setStyleSheet("color:#94a3b8; font-size:11px; font-weight:bold; background:transparent; border:none;")
         self._history  = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
         self._val_lbl.setText("—")
         self._ax.cla()
         self._ax.set_facecolor(F1_DARK_BG)
-        self._ax.tick_params(labelsize=7.5, colors='#ffffff' if F1_TEXT == '#e0e0e0' else '#111111')
-        self._ax.grid(True, color='#444444' if F1_TEXT == '#e0e0e0' else '#cccccc', alpha=0.35)
+        self._ax.tick_params(labelsize=8.5, colors='#ffffff' if F1_TEXT == '#f1f5f9' else '#111111')
+        self._ax.grid(True, color='#444444' if F1_TEXT == '#f1f5f9' else '#cccccc', alpha=0.35)
         for s in self._ax.spines.values():
-            s.set_color('#555555' if F1_TEXT == '#e0e0e0' else '#aaaaaa')
-        self._line, = self._ax.plot([], [], color=ISC_GREEN, linewidth=1.1)
+            s.set_color('#555555' if F1_TEXT == '#f1f5f9' else '#aaaaaa')
+        self._line, = self._ax.plot([], [], color=ISC_GREEN, linewidth=1.2)
         self._canvas.draw_idle()
         self._border_idle()
 
@@ -1421,6 +1448,10 @@ class DroppablePlotPanel(QFrame):
         else:
             val = 0.0
         self._history.append(val)
+        unit = getattr(self, '_unit', '')
+        self._val_lbl.setText(f"{val:.1f} {unit}" if unit else f"{val:.1f}")
+        if not self.isVisible():
+            return
         y = list(self._history)
         x = list(range(len(y)))
         self._line.set_data(x, y)
@@ -1429,8 +1460,6 @@ class DroppablePlotPanel(QFrame):
         self._ax.set_xlim(0, HISTORY_LEN)
         self._ax.set_ylim(lo - mg, hi + mg)
         self._canvas.draw_idle()
-        unit = getattr(self, '_unit', '')
-        self._val_lbl.setText(f"{val:.1f} {unit}" if unit else f"{val:.1f}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2648,6 +2677,11 @@ class MainWindow(QMainWindow):
         if icon.exists():
             self.setWindowIcon(QIcon(str(icon)))
 
+        self._acu_v_cache = {}
+        self._acu_t_cache = {}
+        self._last_soc_vtc6 = 0.0
+        self._last_time_str = "STANDBY"
+
         self._build_ui()
         self._apply_theme()
         self._update_widget_thresholds()
@@ -2831,23 +2865,58 @@ class MainWindow(QMainWindow):
 
     # ── style helpers ─────────────────────────────────────────────────────────
     def get_input_style(self) -> str:
-        return (f"background:{F1_MID_BG}; color:{F1_TEXT}; "
-                f"border:1px solid {ISC_GREEN}; font-size:13px; padding:4px; border-radius:2px;")
+        is_light = (F1_TEXT == '#1a1a1a')
+        bg = '#ffffff' if is_light else '#18181b'
+        fg = '#111111' if is_light else '#f1f5f9'
+        border = '#cbd5e1' if is_light else '#3f3f46'
+        focus_bg = '#f8fafc' if is_light else '#202024'
+        ph = '#94a3b8' if is_light else '#71717a'
+        return f"""
+            QLineEdit, QComboBox {{
+                background: {bg};
+                color: {fg};
+                border: 1.5px solid {border};
+                border-radius: 4px;
+                padding: 5px 9px;
+                font-size: 12.5px;
+                font-family: 'Segoe UI', system-ui, sans-serif;
+                selection-background-color: {ISC_GREEN};
+                selection-color: #000000;
+            }}
+            QLineEdit:focus, QComboBox:focus {{
+                border: 2px solid {ISC_GREEN};
+                background: {focus_bg};
+                color: {fg};
+            }}
+            QLineEdit:hover, QComboBox:hover {{
+                border: 1.5px solid {'#94a3b8' if is_light else '#71717a'};
+            }}
+            QLineEdit::placeholder {{
+                color: {ph};
+            }}
+        """
 
     def get_button_style(self, v: str = 'default') -> str:
         if v == 'accent':
-            bg, fg, br, hbg, hfg = ISC_GREEN, F1_DARK_BG, 'none', '#009a00', F1_DARK_BG
+            bg, fg, br, hbg, hfg = ISC_GREEN, '#000000', 'none', '#00e676', '#000000'
         elif v == 'danger':
-            bg, fg, br, hbg, hfg = '#7f1d1d', F1_TEXT, 'none', '#dc2626', 'white'
+            bg, fg, br, hbg, hfg = '#7f1d1d', '#ffffff', 'none', '#dc2626', '#ffffff'
         else:
-            # Solid filled dark button — fully filled background, green text
-            bg, fg, br, hbg, hfg = F1_PANEL_BG, ISC_GREEN, f'1px solid #2a2a2a', ISC_GREEN, F1_DARK_BG
+            is_light = (F1_TEXT == '#1a1a1a')
+            bg = '#e2e8f0' if is_light else '#24242a'
+            fg = '#00873a' if is_light else ISC_GREEN
+            br = f'1.5px solid {"#cbd5e1" if is_light else "#3f3f46"}'
+            hbg = '#cbd5e1' if is_light else '#2e2e36'
+            hfg = '#005f28' if is_light else '#00e676'
         return f"""
-            QPushButton {{ background:{bg}; color:{fg}; border:{br};
-                           border-radius:3px; padding:5px 11px;
-                           font-size:11px; font-weight:bold; }}
-            QPushButton:hover {{ background:{hbg}; color:{hfg}; }}
-            QPushButton:disabled {{ background:#1a1a1a; color:#444; border:1px solid #222; }}
+            QPushButton {{
+                background: {bg}; color: {fg}; border: {br};
+                border-radius: 4px; padding: 6px 13px;
+                font-size: 11.5px; font-weight: bold;
+                font-family: 'Segoe UI', sans-serif;
+            }}
+            QPushButton:hover {{ background: {hbg}; color: {hfg}; }}
+            QPushButton:disabled {{ background: #18181b; color: #52525b; border: 1px solid #27272a; }}
         """
 
     @staticmethod
@@ -2857,7 +2926,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _vsep() -> QFrame:
         f = QFrame(); f.setFrameShape(QFrame.VLine)
-        f.setStyleSheet("color:#2a2a2a; max-width:1px;"); return f
+        f.setStyleSheet("color:#3f3f46; max-width:1px;"); return f
 
     def _apply_theme(self):
         pal = QPalette()
@@ -2868,31 +2937,36 @@ class MainWindow(QMainWindow):
         pal.setColor(QPalette.Button,          QColor(F1_MID_BG))
         pal.setColor(QPalette.ButtonText,      QColor(ISC_GREEN))
         pal.setColor(QPalette.Highlight,       QColor(ISC_GREEN))
-        pal.setColor(QPalette.HighlightedText, QColor(F1_DARK_BG))
+        pal.setColor(QPalette.HighlightedText, QColor('#000000'))
         self.setPalette(pal)
         self.setStyleSheet(f"""
             QMainWindow {{ background:{F1_DARK_BG}; }}
-            QTabWidget::pane {{ border:1px solid {ISC_GREEN}; background:{F1_DARK_BG}; }}
+            QTabWidget::pane {{ border:1.5px solid {ISC_GREEN}; background:{F1_DARK_BG}; }}
             QTabBar::tab {{
                 background:{F1_MID_BG}; color:{F1_TEXT};
-                padding:8px 22px; margin-right:1px;
-                border-top:1px solid {ISC_GREEN};
-                border-left:1px solid {ISC_GREEN};
-                border-right:1px solid {ISC_GREEN};
-                font-size:11px;
+                padding:9px 24px; margin-right:2px;
+                border-top:1.5px solid {ISC_GREEN};
+                border-left:1.5px solid {ISC_GREEN};
+                border-right:1.5px solid {ISC_GREEN};
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                font-size:12px; font-weight:bold;
             }}
-            QTabBar::tab:selected {{ background:{ISC_GREEN}; color:{F1_DARK_BG}; font-weight:bold; }}
+            QTabBar::tab:selected {{ background:{ISC_GREEN}; color:#000000; font-weight:bold; }}
             QLabel {{ color:{F1_TEXT}; }}
             QGroupBox {{
-                color:{ISC_GREEN}; border:1px solid #252525;
-                margin-top:14px; font-size:9px; font-weight:bold;
+                color:{ISC_GREEN}; border:1px solid #2e2e34;
+                margin-top:16px; font-size:11px; font-weight:bold;
+                border-radius:4px;
             }}
             QGroupBox::title {{
                 subcontrol-origin:margin; subcontrol-position:top left;
-                padding:0 5px; color:{ISC_GREEN}; background:{F1_DARK_BG};
+                padding:1px 8px; color:{ISC_GREEN}; background:{F1_DARK_BG};
+                font-size:11px; font-weight:bold;
             }}
-            QScrollBar:vertical {{ background:{F1_DARK_BG}; width:7px; }}
-            QScrollBar::handle:vertical {{ background:#333; border-radius:3px; }}
+            QScrollBar:vertical {{ background:{F1_DARK_BG}; width:8px; border-radius:4px; }}
+            QScrollBar::handle:vertical {{ background:#3f3f46; border-radius:4px; min-height:20px; }}
+            QScrollBar::handle:vertical:hover {{ background:#52525b; }}
         """)
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -2916,13 +2990,14 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._tab_powertrain(),    "Powertrain")
         self._tabs.addTab(self._tab_dynamics(),      "Dynamics")
         self._tabs.addTab(self._tab_post_race(),     "Post-Race")
+        self._tabs.currentChanged.connect(self._on_tab_changed)
         vbox.addWidget(self._tabs, stretch=10)
 
         vbox.addWidget(self._make_log_strip(), stretch=1)
 
         attr = QLabel("Andrés Sánchez de Ágreda © 2025/2026  —  ICAI Racing Formula Student")
         attr.setAlignment(Qt.AlignCenter)
-        attr.setStyleSheet("color:#252525; font-size:8px;")
+        attr.setStyleSheet("color:#64748b; font-size:10px; font-weight:500;")
         vbox.addWidget(attr)
 
     # ── Top bar ───────────────────────────────────────────────────────────────
@@ -2949,8 +3024,8 @@ class MainWindow(QMainWindow):
             logo_lbl.setStyleSheet(f"color:{ISC_GREEN}; font-size:20px; font-weight:bold;")
         ll.addWidget(logo_lbl)
         vn = QVBoxLayout()
-        vn.addWidget(self._lbl("ISCmetrics", f"color:{ISC_GREEN}; font-size:15px; font-weight:bold;"))
-        vn.addWidget(self._lbl(f"Formula Student Telemetry v{APP_VERSION}", "color:#666; font-size:9px;"))
+        vn.addWidget(self._lbl("ISCmetrics", f"color:{ISC_GREEN}; font-size:16px; font-weight:bold;"))
+        vn.addWidget(self._lbl(f"Formula Student Telemetry v{APP_VERSION}", f"color:{F1_MUTED}; font-size:11px; font-weight:500;"))
         ll.addLayout(vn)
         h.addWidget(lf)
         h.addWidget(self._vsep())
@@ -2960,19 +3035,29 @@ class MainWindow(QMainWindow):
         ls = f"color:{ISC_GREEN}; font-size:11px; font-weight:bold;"
         ins = self.get_input_style()
         fg.addWidget(self._lbl("PILOT:",   ls), 0, 0)
-        self._inp_pilot = QLineEdit("Piloto_Test"); self._inp_pilot.setStyleSheet(ins)
-        self._inp_pilot.setMinimumWidth(170); fg.addWidget(self._inp_pilot, 0, 1)
+        self._inp_pilot = QLineEdit("Piloto_Test")
+        self._inp_pilot.setStyleSheet(ins)
+        self._inp_pilot.setMinimumWidth(180)
+        self._inp_pilot.setMinimumHeight(28)
+        fg.addWidget(self._inp_pilot, 0, 1)
+
         fg.addWidget(self._lbl("CIRCUIT:", ls), 1, 0)
-        self._inp_circuit = QLineEdit("Circuito_Test"); self._inp_circuit.setStyleSheet(ins)
-        self._inp_circuit.setMinimumWidth(170); fg.addWidget(self._inp_circuit, 1, 1)
+        self._inp_circuit = QLineEdit("Circuito_Test")
+        self._inp_circuit.setStyleSheet(ins)
+        self._inp_circuit.setMinimumWidth(180)
+        self._inp_circuit.setMinimumHeight(28)
+        fg.addWidget(self._inp_circuit, 1, 1)
         h.addLayout(fg)
         h.addWidget(self._vsep())
 
         # Mini metrics
         mv = QVBoxLayout()
-        self._mini_rpm  = QLabel("0 rpm");  self._mini_rpm.setStyleSheet("color:#777; font-size:9px;")
-        self._mini_vbus = QLabel("0 V");    self._mini_vbus.setStyleSheet("color:#777; font-size:9px;")
-        self._mini_temp = QLabel("0 °C");   self._mini_temp.setStyleSheet("color:#777; font-size:9px;")
+        self._mini_rpm  = QLabel("0 rpm")
+        self._mini_rpm.setStyleSheet("color:#cbd5e1; font-size:11px; font-weight:600;")
+        self._mini_vbus = QLabel("0 V")
+        self._mini_vbus.setStyleSheet("color:#cbd5e1; font-size:11px; font-weight:600;")
+        self._mini_temp = QLabel("0 °C")
+        self._mini_temp.setStyleSheet("color:#cbd5e1; font-size:11px; font-weight:600;")
         for l in (self._mini_rpm, self._mini_vbus, self._mini_temp): mv.addWidget(l)
         h.addLayout(mv)
         h.addStretch()
@@ -2980,10 +3065,11 @@ class MainWindow(QMainWindow):
         # Status badge
         self._status_lbl = QLabel("IDLE")
         self._status_lbl.setAlignment(Qt.AlignCenter)
-        self._status_lbl.setFixedWidth(88)
+        self._status_lbl.setFixedWidth(96)
+        self._status_lbl.setFixedHeight(36)
         self._status_lbl.setStyleSheet(
-            f"background:{F1_MID_BG}; color:#555; font-size:14px; font-weight:bold;"
-            f"padding:8px 10px; border:2px solid #333; border-radius:4px;")
+            f"background:#27272a; color:{F1_MUTED}; font-size:13px; font-weight:bold;"
+            f"padding:6px 12px; border:1.5px solid #52525b; border-radius:4px;")
         h.addWidget(self._status_lbl)
         h.addWidget(self._vsep())
 
@@ -3056,15 +3142,15 @@ class MainWindow(QMainWindow):
         self._line_brk, = self._ax_tb.plot([], [], color=F1_ERROR,   linewidth=1.4, label='Brake [%]')
         self._ax_tb.set_facecolor(F1_DARK_BG)
         self._ax_tb.set_title('Throttle / Brake  [%]', color=F1_WARNING,
-                               fontsize=8, fontweight='bold', pad=2)
+                               fontsize=10, fontweight='bold', pad=3)
         self._ax_tb.set_ylim(-5, 105)
         self._ax_tb.set_xlim(0, HISTORY_LEN)
-        self._ax_tb.tick_params(labelsize=7.5, colors='#ffffff' if F1_TEXT == '#e0e0e0' else '#111111')
-        self._ax_tb.grid(True, color='#444444' if F1_TEXT == '#e0e0e0' else '#cccccc', alpha=0.35)
-        self._ax_tb.legend(fontsize=7, loc='upper left',
+        self._ax_tb.tick_params(labelsize=8.5, colors='#ffffff' if F1_TEXT == '#f1f5f9' else '#111111')
+        self._ax_tb.grid(True, color='#444444' if F1_TEXT == '#f1f5f9' else '#cccccc', alpha=0.35)
+        self._ax_tb.legend(fontsize=8, loc='upper left',
                            facecolor=F1_PANEL_BG, labelcolor=F1_TEXT,
-                           edgecolor='#555555' if F1_TEXT == '#e0e0e0' else '#aaaaaa', framealpha=0.8)
-        for sp in self._ax_tb.spines.values(): sp.set_color('#555555' if F1_TEXT == '#e0e0e0' else '#aaaaaa')
+                           edgecolor='#555555' if F1_TEXT == '#f1f5f9' else '#aaaaaa', framealpha=0.8)
+        for sp in self._ax_tb.spines.values(): sp.set_color('#555555' if F1_TEXT == '#f1f5f9' else '#aaaaaa')
         self._canvas_tb = FigureCanvas(fig_tb)
         tb_widget = QWidget()
         tb_lay = QVBoxLayout(tb_widget); tb_lay.setContentsMargins(0,0,0,0)
@@ -3089,20 +3175,20 @@ class MainWindow(QMainWindow):
         
         # Live decoded fault label
         self._lbl_inv_errors = QLabel("")
-        self._lbl_inv_errors.setStyleSheet("color:#ff3333; font-size:10px; font-weight:bold;")
+        self._lbl_inv_errors.setStyleSheet("color:#ff3333; font-size:11px; font-weight:bold;")
         self._lbl_inv_errors.hide()
 
         # GPS live status label (shown in indicator row)
         self._lbl_gps = QLabel("GPS: NO FIX")
         self._lbl_gps.setStyleSheet(
-            "color:#555; font-size:9px; font-family:'Courier New'; font-weight:bold;"
+            f"color:{F1_MUTED}; font-size:11px; font-family:'Consolas', monospace; font-weight:bold;"
         )
 
         for l in (self._ind_precharge, self._ind_inv_ok, self._ind_ams):
-            l.setStyleSheet("color:#333; font-size:10px; font-weight:bold;")
+            l.setStyleSheet("color:#52525b; font-size:11px; font-weight:bold;")
         for l in (self._lbl_seq, self._lbl_tick):
-            l.setStyleSheet("color:#444; font-size:9px; font-family:'Courier New';")
-        self._lbl_lqi.setStyleSheet("color:#00c853; font-size:9px; font-family:'Courier New';")
+            l.setStyleSheet(f"color:{F1_MUTED}; font-size:11px; font-family:'Consolas', monospace; font-weight:600;")
+        self._lbl_lqi.setStyleSheet(f"color:{ISC_GREEN}; font-size:11px; font-family:'Consolas', monospace; font-weight:bold;")
         for w2 in (self._ind_precharge, self._ind_inv_ok, self._ind_ams,
                    self._lbl_seq, self._lbl_tick, self._signal_bars, self._lbl_lqi,
                    self._lbl_inv_errors, self._lbl_gps):
@@ -3125,8 +3211,8 @@ class MainWindow(QMainWindow):
         # Fault Card Frame
         fault_box = QGroupBox("AMS FAULT LATCH & SAFETY STATUS (CAN 0x4A3)")
         fault_box.setStyleSheet(
-            f"QGroupBox {{ color:{F1_ERROR}; border:1px solid {F1_ERROR}; "
-            f"margin-top:14px; font-size:10px; font-weight:bold; }} "
+            f"QGroupBox {{ color:{F1_ERROR}; border:1.5px solid {F1_ERROR}; "
+            f"margin-top:14px; font-size:11px; font-weight:bold; }} "
             f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
             f"padding:0 6px; color:{F1_ERROR}; background:{F1_DARK_BG}; }}"
         )
@@ -3136,39 +3222,39 @@ class MainWindow(QMainWindow):
         fb_lay.setContentsMargins(10, 12, 10, 10)
 
         # FSM State
-        fb_lay.addWidget(self._lbl("FSM STATE:", f"color:{ISC_GREEN}; font-size:10px; font-weight:bold;"), 0, 0)
+        fb_lay.addWidget(self._lbl("FSM STATE:", f"color:{ISC_GREEN}; font-size:11px; font-weight:bold;"), 0, 0)
         self._acu_fsm_lbl = QLabel("0 (STANDBY)")
         self._acu_fsm_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:12px; font-weight:bold;")
         fb_lay.addWidget(self._acu_fsm_lbl, 0, 1)
 
         # Tripped Reason
-        fb_lay.addWidget(self._lbl("FAULT REASON:", f"color:{F1_ERROR}; font-size:10px; font-weight:bold;"), 0, 2)
+        fb_lay.addWidget(self._lbl("FAULT REASON:", f"color:{F1_ERROR}; font-size:11px; font-weight:bold;"), 0, 2)
         self._acu_fault_reason_lbl = QLabel("No Fault")
-        self._acu_fault_reason_lbl.setStyleSheet("color:#10b981; font-size:12px; font-weight:bold;")
+        self._acu_fault_reason_lbl.setStyleSheet(f"color:{ISC_GREEN}; font-size:12px; font-weight:bold;")
         fb_lay.addWidget(self._acu_fault_reason_lbl, 0, 3)
 
         # Offending Location (Module, Cell/NTC)
-        fb_lay.addWidget(self._lbl("OFFENDING LOC:", "color:#f59e0b; font-size:10px; font-weight:bold;"), 1, 0)
+        fb_lay.addWidget(self._lbl("OFFENDING LOC:", "color:#f59e0b; font-size:11px; font-weight:bold;"), 1, 0)
         self._acu_offending_loc_lbl = QLabel("None")
-        self._acu_offending_loc_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:11px; font-family:'Courier New';")
+        self._acu_offending_loc_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:12px; font-family:'Consolas', monospace; font-weight:bold;")
         fb_lay.addWidget(self._acu_offending_loc_lbl, 1, 1)
 
         # Tripped Reading Value
-        fb_lay.addWidget(self._lbl("TRIPPED VALUE:", "color:#f59e0b; font-size:10px; font-weight:bold;"), 1, 2)
+        fb_lay.addWidget(self._lbl("TRIPPED VALUE:", "color:#f59e0b; font-size:11px; font-weight:bold;"), 1, 2)
         self._acu_tripped_val_lbl = QLabel("—")
-        self._acu_tripped_val_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:11px; font-family:'Courier New'; font-weight:bold;")
+        self._acu_tripped_val_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:12px; font-family:'Consolas', monospace; font-weight:bold;")
         fb_lay.addWidget(self._acu_tripped_val_lbl, 1, 3)
 
         # Hardware Error Latch Status
-        fb_lay.addWidget(self._lbl("SHUTDOWN LATCH:", "color:#38bdf8; font-size:10px; font-weight:bold;"), 2, 0)
+        fb_lay.addWidget(self._lbl("SHUTDOWN LATCH:", "color:#38bdf8; font-size:11px; font-weight:bold;"), 2, 0)
         self._acu_latch_lbl = QLabel("CLEAR (NORMAL)")
-        self._acu_latch_lbl.setStyleSheet("color:#10b981; font-size:11px; font-weight:bold;")
+        self._acu_latch_lbl.setStyleSheet(f"color:{ISC_GREEN}; font-size:12px; font-weight:bold;")
         fb_lay.addWidget(self._acu_latch_lbl, 2, 1)
 
         # Sub-fault Bitmask Details
-        fb_lay.addWidget(self._lbl("DIAG BITMASKS:", "color:#a855f7; font-size:10px; font-weight:bold;"), 2, 2)
+        fb_lay.addWidget(self._lbl("DIAG BITMASKS:", "color:#a855f7; font-size:11px; font-weight:bold;"), 2, 2)
         self._acu_subfault_lbl = QLabel("DISC: 0x00 | OPEN: 0x00 | TAP: 0x00")
-        self._acu_subfault_lbl.setStyleSheet("color:#888; font-size:10px; font-family:'Courier New';")
+        self._acu_subfault_lbl.setStyleSheet(f"color:{F1_MUTED}; font-size:11px; font-family:'Consolas', monospace; font-weight:600;")
         fb_lay.addWidget(self._acu_subfault_lbl, 2, 3)
 
         top_box.addWidget(fault_box, stretch=3)
@@ -3178,13 +3264,13 @@ class MainWindow(QMainWindow):
         self._acu_vmax_card = MetricCard("MAX CELL", "mV", color=ISC_GREEN)
         self._acu_vspread_card = MetricCard("ΔV SPREAD", "mV", color=F1_WARNING)
         self._acu_tmin_card = MetricCard("MIN TEMP", "°C", color=F1_BLUE)
-        self._acu_tmax_card = MetricCard("MAX TEMP (HOTSPOT)", "°C", color=F1_ERROR)
+        self._acu_tmax_card = MetricCard("MAX TEMP (HOT)", "°C", color=F1_ERROR)
         self._acu_tavg_card = MetricCard("AVG TEMP", "°C", color=ISC_GREEN)
         self._acu_tdt_card = MetricCard("MAX dT/dt", "°C/min", color=F1_WARNING)
 
         for card in (self._acu_vmin_card, self._acu_vmax_card, self._acu_vspread_card,
                      self._acu_tmin_card, self._acu_tmax_card, self._acu_tavg_card, self._acu_tdt_card):
-            card.setFixedWidth(105)
+            card.setFixedWidth(115)
             top_box.addWidget(card, stretch=1)
 
         v.addLayout(top_box, stretch=1)
@@ -3192,8 +3278,8 @@ class MainWindow(QMainWindow):
         # ── 2. Middle Section: 95-Cell Voltage Matrix (5x19) ──────────────────
         v_box = QGroupBox("95-CELL VOLTAGE MATRIX [mV] — 5 MODULES × 19 CELLS (CAN 0x4B0)")
         v_box.setStyleSheet(
-            f"QGroupBox {{ color:{ISC_GREEN}; border:1px solid #333; "
-            f"margin-top:10px; font-size:10px; font-weight:bold; }} "
+            f"QGroupBox {{ color:{ISC_GREEN}; border:1px solid #3f3f46; "
+            f"margin-top:10px; font-size:11px; font-weight:bold; }} "
             f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
             f"padding:0 6px; color:{ISC_GREEN}; background:{F1_DARK_BG}; }}"
         )
@@ -3208,8 +3294,8 @@ class MainWindow(QMainWindow):
         self._table_voltages.horizontalHeader().setDefaultSectionSize(46)
         self._table_voltages.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._table_voltages.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table_voltages.horizontalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{F1_TEXT}; font-size:9px; font-weight:bold;")
-        self._table_voltages.verticalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{ISC_GREEN}; font-size:9px; font-weight:bold;")
+        self._table_voltages.horizontalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{F1_TEXT}; font-size:10px; font-weight:bold;")
+        self._table_voltages.verticalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{ISC_GREEN}; font-size:10px; font-weight:bold;")
         self._table_voltages.setStyleSheet(
             f"QTableWidget {{ background:{F1_DARK_BG}; gridline-color:#2a2a2a; border:none; }}"
         )
@@ -3218,7 +3304,7 @@ class MainWindow(QMainWindow):
             for c in range(19):
                 item = QTableWidgetItem("0")
                 item.setTextAlignment(Qt.AlignCenter)
-                item.setFont(QFont("Segoe UI", 8, QFont.Bold))
+                item.setFont(QFont("Segoe UI", 9, QFont.Bold))
                 item.setBackground(QBrush(QColor("#18181b")))
                 item.setForeground(QBrush(QColor(F1_TEXT)))
                 self._table_voltages.setItem(m, c, item)
@@ -3229,8 +3315,8 @@ class MainWindow(QMainWindow):
         # ── 3. Bottom Section: 190-Sensor Thermal Matrix (5x38) ────────────────
         t_box = QGroupBox("190-SENSOR THERMAL MATRIX [°C] — 5 MODULES × 38 NTC SENSORS (CAN 0x4B1)")
         t_box.setStyleSheet(
-            f"QGroupBox {{ color:{F1_WARNING}; border:1px solid #333; "
-            f"margin-top:10px; font-size:10px; font-weight:bold; }} "
+            f"QGroupBox {{ color:{F1_WARNING}; border:1px solid #3f3f46; "
+            f"margin-top:10px; font-size:11px; font-weight:bold; }} "
             f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
             f"padding:0 6px; color:{F1_WARNING}; background:{F1_DARK_BG}; }}"
         )
@@ -3245,8 +3331,8 @@ class MainWindow(QMainWindow):
         self._table_temps.horizontalHeader().setDefaultSectionSize(26)
         self._table_temps.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._table_temps.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table_temps.horizontalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{F1_TEXT}; font-size:8px;")
-        self._table_temps.verticalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{F1_WARNING}; font-size:8px; font-weight:bold;")
+        self._table_temps.horizontalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{F1_TEXT}; font-size:9px; font-weight:bold;")
+        self._table_temps.verticalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{F1_WARNING}; font-size:9px; font-weight:bold;")
         self._table_temps.setStyleSheet(
             f"QTableWidget {{ background:{F1_DARK_BG}; gridline-color:#2a2a2a; border:none; }}"
         )
@@ -3255,7 +3341,7 @@ class MainWindow(QMainWindow):
             for n in range(38):
                 item = QTableWidgetItem("—")
                 item.setTextAlignment(Qt.AlignCenter)
-                item.setFont(QFont("Segoe UI", 7, QFont.Bold))
+                item.setFont(QFont("Segoe UI", 8, QFont.Bold))
                 item.setBackground(QBrush(QColor("#18181b")))
                 item.setForeground(QBrush(QColor(F1_TEXT)))
                 self._table_temps.setItem(m, n, item)
@@ -3275,10 +3361,10 @@ class MainWindow(QMainWindow):
         lv.addWidget(self._lbl("Available Channels",
                                 f"color:{ISC_GREEN}; font-size:11px; font-weight:bold;"))
         lv.addWidget(self._lbl("Drag onto a panel to plot it.",
-                                "color:#444; font-size:9px;"))
+                                f"color:{F1_MUTED}; font-size:11px;"))
         self._ch_list = ChannelListWidget()
         lv.addWidget(self._ch_list)
-        lw = QWidget(); lw.setLayout(lv); lw.setFixedWidth(196)
+        lw = QWidget(); lw.setLayout(lv); lw.setFixedWidth(205)
         h.addWidget(lw)
 
         # Right: 2 × 3 drop panels
@@ -3315,7 +3401,7 @@ class MainWindow(QMainWindow):
         self._pt_tm2   = MetricCard("Motor Temp (KTY)", "ºC", ISC_GREEN)
         self._pt_pwr   = MetricCard("Power Stage (IGBT)", "ºC", ISC_GREEN)
         self._pt_tbd   = MetricCard("Board Temp", "ºC", ISC_GREEN)
-        self._pt_tm1   = MetricCard("Sensor 1",   "ºC", F1_MID_BG)
+        self._pt_tm1   = MetricCard("Sensor 1",   "ºC", F1_MUTED)
         self._pt_tdcdc = MetricCard("DC-DC",     "ºC", ISC_GREEN)
         self._pt_dem   = MetricCard("DEM Code",  "",   F1_ERROR)
         self._pt_foc   = MetricCard("FOC BitState", "", ISC_GREEN)
@@ -3348,11 +3434,11 @@ class MainWindow(QMainWindow):
         psb = QGroupBox("PREDICTIVE ANALYTICS & STRATEGY")
         psg = QGridLayout(psb)
         self._pt_eff        = MetricCard("Consumption Rate",  "Wh/min", ISC_GREEN)
-        self._pt_heat       = MetricCard("Heating Rate",      "ºC/min", F1_WARNING)
-        self._pt_overtemp   = MetricCard("Est. Overtemp",     "min",    F1_ERROR)
-        self._pt_rint       = MetricCard("Pack Internal R",   "mΩ",     F1_PURPLE)
+        self._pt_heat       = MetricCard("Thermal Rise (dT/dt)","ºC/min", F1_WARNING)
+        self._pt_overtemp   = MetricCard("Time to OverTemp",   "min",    F1_ERROR)
+        self._pt_rint       = MetricCard("Est. Internal Res.", "mΩ",     F1_BLUE)
         self._pt_rec_tq     = MetricCard("Rec. Torque %",     "%",      ISC_GREEN)
-        self._pt_wh_used    = MetricCard("Session Energy",    "Wh",     F1_BLUE)
+        self._pt_wh_used    = MetricCard("Energy Used",       "Wh",     F1_BLUE)
         self._pt_cell_imb   = MetricCard("Cell Imbalance",    "mV",     F1_WARNING)
         psg.addWidget(self._pt_eff,      0, 0); psg.addWidget(self._pt_heat,     0, 1)
         psg.addWidget(self._pt_overtemp, 1, 0); psg.addWidget(self._pt_rint,     1, 1)
@@ -3360,30 +3446,30 @@ class MainWindow(QMainWindow):
         psg.addWidget(self._pt_cell_imb, 3, 0, 1, 2)
         top.addWidget(psb, stretch=2)
 
-        v.addLayout(top, stretch=3)
+        v.addLayout(top)
 
-        # ── Bottom section: per-module bars ────────────────────────────────────
-        bot = QHBoxLayout(); bot.setSpacing(8)
+        # Module bars (Module 0-4 Vmin/Vmax and Tmax)
+        mb_box = QGroupBox("PER-MODULE SUMMARY (VOLTAGE & TEMPERATURE)")
+        mb_box.setStyleSheet(
+            f"QGroupBox {{ color:{ISC_GREEN}; border:1px solid #3f3f46; "
+            f"margin-top:14px; font-size:11px; font-weight:bold; }} "
+            f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
+            f"padding:0 6px; color:{ISC_GREEN}; background:{F1_DARK_BG}; }}"
+        )
+        mb_lay = QGridLayout(mb_box)
+        mb_lay.setContentsMargins(10, 14, 10, 10)
+        mb_lay.setSpacing(8)
 
-        alert_temp = self.settings.get("alert_temp_c", 40.0)
-        alert_cell = self.settings.get("alert_cell_mv", 3400.0)
-
-        self._vbox_v = QGroupBox(f"PER-MODULE CELL VOLTAGE  [mV]   (min to max)   —   ALERT < {alert_cell:.0f} mV")
-        vbv = QVBoxLayout(self._vbox_v)
-        self._mod_v_bars: List[ModuleBarWidget] = []
+        self._mod_v_bars = []
+        self._mod_t_bars = []
         for i in range(5):
-            b = ModuleBarWidget(i, "mV", lo=2800, hi=4250, warn_lo=alert_cell)
-            vbv.addWidget(b); self._mod_v_bars.append(b)
-        bot.addWidget(self._vbox_v, stretch=1)
-
-        self._vbox_t = QGroupBox(f"PER-MODULE MAX TEMPERATURE  [ºC]   —   ALERT > {alert_temp:.0f} ºC")
-        vbt = QVBoxLayout(self._vbox_t)
-        self._mod_t_bars: List[ModuleBarWidget] = []
-        for i in range(5):
-            b = ModuleBarWidget(i, "ºC", lo=0, hi=80, warn_hi=alert_temp)
-            vbt.addWidget(b); self._mod_t_bars.append(b)
-        bot.addWidget(self._vbox_t, stretch=1)
-        v.addLayout(bot, stretch=3)
+            vb = ModuleBarWidget(i, "mV", lo=2800, hi=4250, warn_lo=3000, warn_hi=4200)
+            tb = ModuleBarWidget(i, "°C", lo=0, hi=65, warn_hi=55)
+            self._mod_v_bars.append(vb)
+            self._mod_t_bars.append(tb)
+            mb_lay.addWidget(vb, i, 0)
+            mb_lay.addWidget(tb, i, 1)
+        v.addWidget(mb_box)
         return w
 
     # ── Tab 4 — Dynamics ──────────────────────────────────────────────────────
@@ -3423,11 +3509,11 @@ class MainWindow(QMainWindow):
         self._g_lat  = QLabel("Lat  G:   0.00")
         self._g_tot  = QLabel("Total G:  0.00")
         for l in (self._g_long, self._g_lat, self._g_tot):
-            l.setStyleSheet(f"color:{ISC_GREEN}; font-size:11px; font-family:'Courier New';")
+            l.setStyleSheet(f"color:{ISC_GREEN}; font-size:11px; font-family:'Consolas', monospace; font-weight:bold;")
             gv.addWidget(l)
         gv.addStretch()
         note = QLabel("IMU channels not yet in\nradio snapshot — placeholder.")
-        note.setStyleSheet("color:#333; font-size:9px;")
+        note.setStyleSheet(f"color:{F1_MUTED}; font-size:10.5px;")
         gv.addWidget(note)
         h.addWidget(gbox, stretch=1)
 
@@ -3440,7 +3526,7 @@ class MainWindow(QMainWindow):
         # Reset-track button (clears trail on new session)
         self._btn_gps_reset = QPushButton("⟳  Reset Track")
         self._btn_gps_reset.setStyleSheet(self.get_button_style())
-        self._btn_gps_reset.setFixedHeight(24)
+        self._btn_gps_reset.setFixedHeight(28)
         self._btn_gps_reset.clicked.connect(self._gps_map.reset_track)
         gpv.addWidget(self._btn_gps_reset)
 
@@ -3454,15 +3540,16 @@ class MainWindow(QMainWindow):
     # ── Log strip ─────────────────────────────────────────────────────────────
     def _make_log_strip(self) -> QGroupBox:
         box = QGroupBox("SYSTEM LOG & PIT-WALL NOTES")
-        box.setStyleSheet(f"QGroupBox {{ color:{ISC_GREEN}; border:1px solid #222; }}")
+        box.setStyleSheet(f"QGroupBox {{ color:{ISC_GREEN}; border:1px solid #3f3f46; font-size:11px; font-weight:bold; }}")
         v = QVBoxLayout(box); v.setContentsMargins(6, 6, 6, 6)
         
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setMinimumHeight(150)
+        self._log.document().setMaximumBlockCount(200)
         self._log.setStyleSheet(
             f"background:{F1_DARK_BG}; color:{F1_TEXT}; "
-            f"font-family:'Courier New'; font-size:9px; border:none;")
+            f"font-family:'Consolas', 'Segoe UI Mono', monospace; font-size:11px; padding:6px; border:none;")
         v.addWidget(self._log)
         
         # Pit-Wall Notes Entry Row
@@ -3472,18 +3559,21 @@ class MainWindow(QMainWindow):
         self._inp_note = QLineEdit()
         self._inp_note.setPlaceholderText("Escriba una nota de telemetría (ej. 'Cambio de neumáticos') y pulse Enter para guardar...")
         self._inp_note.setStyleSheet(self.get_input_style())
+        self._inp_note.setMinimumHeight(32)
         self._inp_note.returnPressed.connect(self._submit_note)
         nh.addWidget(self._inp_note, stretch=8)
         
         self._btn_add_note = QPushButton("Add Note")
         self._btn_add_note.setStyleSheet(self.get_button_style())
         self._btn_add_note.setFixedWidth(100)
+        self._btn_add_note.setFixedHeight(32)
         self._btn_add_note.clicked.connect(self._submit_note)
         nh.addWidget(self._btn_add_note)
 
         self._btn_fault_hist = QPushButton("Fault History")
         self._btn_fault_hist.setStyleSheet(self.get_button_style())
         self._btn_fault_hist.setFixedWidth(120)
+        self._btn_fault_hist.setFixedHeight(32)
         self._btn_fault_hist.setToolTip("View persistent fault event log (DEM codes, APPS implausibility)")
         self._btn_fault_hist.clicked.connect(self._open_fault_history)
         nh.addWidget(self._btn_fault_hist)
@@ -3491,6 +3581,7 @@ class MainWindow(QMainWindow):
         self._btn_fault_db = QPushButton("Fault Pattern DB")
         self._btn_fault_db.setStyleSheet(self.get_button_style())
         self._btn_fault_db.setFixedWidth(140)
+        self._btn_fault_db.setFixedHeight(32)
         self._btn_fault_db.setToolTip("Analyse fault patterns across ALL historical CSV logs")
         self._btn_fault_db.clicked.connect(self._open_fault_pattern_db)
         nh.addWidget(self._btn_fault_db)
@@ -3633,11 +3724,24 @@ class MainWindow(QMainWindow):
         snap = self._snap()
         self._check_alerts(snap)
         self._update_badge()
-        self._update_overview(snap)
-        self._update_acu_overview(snap)
-        self._update_powertrain(snap)
-        self._update_dynamics(snap)
-        self._update_customize(snap)
+
+        # Shared telemetry math and CSV writeback always run regardless of active tab
+        soc_vtc6, time_str = self._update_shared_analytics(snap)
+        self._update_top_bar_mini(snap)
+
+        # Tab-gated rendering: only execute heavy UI updates for the active tab
+        current_idx = self._tabs.currentIndex()
+        if current_idx == 0:
+            self._render_overview_tab(snap, soc_vtc6, time_str)
+        elif current_idx == 1:
+            self._update_acu_overview(snap)
+        elif current_idx == 2:
+            self._update_customize(snap)
+        elif current_idx == 3:
+            self._update_powertrain(snap)
+        elif current_idx == 4:
+            self._update_dynamics(snap)
+
         # Log new data strings
         if rtt.new_data_flag == 1:
             self._log_append(rtt.data_str)
@@ -3646,6 +3750,20 @@ class MainWindow(QMainWindow):
         if self.is_receiving and not self.demo_mode:
             if self.rx_thread and not self.rx_thread.is_alive():
                 self._stop()
+
+    def _on_tab_changed(self, idx: int):
+        """Immediately update the newly selected tab on user switch."""
+        snap = self._snap()
+        if idx == 0:
+            self._render_overview_tab(snap, getattr(self, '_last_soc_vtc6', 0.0), getattr(self, '_last_time_str', 'STANDBY'))
+        elif idx == 1:
+            self._update_acu_overview(snap)
+        elif idx == 2:
+            self._update_customize(snap)
+        elif idx == 3:
+            self._update_powertrain(snap)
+        elif idx == 4:
+            self._update_dynamics(snap)
 
     def _update_badge(self):
         st    = rtt.get_latest_data().get("__STATUS__", {})
@@ -3664,21 +3782,21 @@ class MainWindow(QMainWindow):
             self._status_lbl.setText("IDLE")
             self._status_lbl.setStyleSheet(f"background:{F1_MID_BG}; color:#555; {base} border:2px solid #333;")
 
-    def _update_overview(self, s: dict):
-        rpm    = s.get('inv_rpm',           0)
+    def _update_top_bar_mini(self, s: dict):
+        rpm   = s.get('inv_rpm', 0)
+        vbus  = s.get('inv_dc_bus_V', 0)
+        tmax  = s.get('temp_max_modulo', [0]*5)
+        max_t = max((t for t in tmax if t != 0), default=0)
+
+        self._mini_rpm.setText(f"{int(rpm):,} rpm")
+        self._mini_vbus.setText(f"{vbus} V")
+        self._mini_temp.setText(f"{max_t:.0f} ºC")
+
+    def _update_shared_analytics(self, s: dict) -> tuple[float, str]:
         vbus   = s.get('inv_dc_bus_V',      0)
         vcell  = s.get('v_cell_min_mV',     0)
-        soc    = s.get('soc',               0)
         tpct   = s.get('torque_pct',        0)
-        icur   = s.get('inv_current_actual',0)
         istate = s.get('inv_state',         0)
-        pre    = s.get('ok_precharge',      0)
-        ams    = s.get('ams_fsm_state',     0)
-        ierr   = s.get('inv_error',         0)
-        seq    = s.get('seq',               0)
-        tick   = s.get('tick_ms',           0)
-        tmax   = s.get('temp_max_modulo',  [0]*5)
-        max_t  = max((t for t in tmax if t != 0), default=0)
 
         # ── SOC: primary=bus voltage (280V=0%, 400V=100%), blend with cell OCV when valid
         raw_soc_vtc6 = soc_from_voltage(
@@ -3688,7 +3806,6 @@ class MainWindow(QMainWindow):
         )
 
         # Monotonic non-increasing latch during active sessions (no regen = SoC never rises)
-        # Gated on raw_soc_vtc6 > 0.0 to prevent precharge (0V bus) from locking SoC at 0%
         if (self.is_receiving or self.demo_mode) and raw_soc_vtc6 > 0.0:
             if not hasattr(self, '_session_min_soc') or self._session_min_soc is None:
                 self._session_min_soc = raw_soc_vtc6
@@ -3701,25 +3818,18 @@ class MainWindow(QMainWindow):
             soc_vtc6 = raw_soc_vtc6
 
         # ── Time remaining: dual estimator ────────────────────────────────────
-        # Source A: rolling 60-second power average (corriente_accu × Vbus)
-        # Source B: linear voltage-drop extrapolation to cutoff (sensor-failure backup)
-        # Displays the more conservative (lower) of the two when both are valid.
-
         i_raw  = float(s.get('corriente_accu', 0))
-        # Protect against inverted polarity or negative current noise while motor is active
         if i_raw < 0 and (int(istate) == 6 or s.get('inv_rpm', 0) > 100 or tpct > 2):
             i_raw = abs(i_raw)
-        i_curr = max(0.0, i_raw)                          # discharge only (regen ignored)
+        i_curr = max(0.0, i_raw)                          # discharge only
         vbus_f = float(vbus) if vbus and vbus > 140 else _SOC_V_FULL
 
-        # ── Initialise persistent state on first call ──────────────────────
         if not hasattr(self, '_i_rolling_hist'):
             self._i_rolling_hist = deque(maxlen=600)      # 60 s at 10 Hz
         if not hasattr(self, '_vdrop_v0'):
-            self._vdrop_v0 = None   # bus voltage at session start (V)
-            self._vdrop_t0 = None   # elapsed time at session start (s)
+            self._vdrop_v0 = None
+            self._vdrop_t0 = None
 
-        # Reset voltage-drop tracker when a new session starts (elapsed resets)
         elapsed = float(s.get('time_elapsed_s', 0))
         if elapsed < 5.0 or self._vdrop_v0 is None:
             if vbus_f > 300:
@@ -3727,48 +3837,44 @@ class MainWindow(QMainWindow):
                 self._vdrop_t0 = elapsed
 
         self._i_rolling_hist.append(i_curr)
-        i_avg   = sum(self._i_rolling_hist) / len(self._i_rolling_hist)
+        i_avg = sum(self._i_rolling_hist) / len(self._i_rolling_hist)
 
-        # ── Racing floor: if inverter is actively running (state 6) and
-        #    current sensor reads near-zero, assume minimum racing power.
-        #    Based on empirical 32-min / 390V endurance run → ~31 A avg.
         INV_RUNNING = (int(s.get('inv_state', 0)) == 6)
-        RACING_FLOOR_A = 20.0   # minimum assumed draw while inverter is running
+        RACING_FLOOR_A = 20.0
         if INV_RUNNING and i_avg < RACING_FLOOR_A:
-            i_eff = RACING_FLOOR_A   # floor prevents absurdly high estimates
+            i_eff = RACING_FLOOR_A
         else:
             i_eff = i_avg
 
-        pwr_eff = i_eff * vbus_f                          # Watts
+        pwr_eff = i_eff * vbus_f
 
-        # ── Source A: current-based Wh estimate ───────────────────────────
+        # Source A: current-based Wh estimate
         wh_rem = _PACK_WH * (soc_vtc6 / 100.0)
         if pwr_eff > 200.0:
             min_rem_i = (wh_rem / pwr_eff) * 60.0
         else:
             min_rem_i = None
 
-        # ── Source B: voltage-drop-rate extrapolation ─────────────────────
+        # Source B: voltage-drop-rate extrapolation
         min_rem_v = None
         if (self._vdrop_v0 is not None and vbus_f > _SOC_V_CUTOFF
                 and elapsed > self._vdrop_t0):
             dt_s = elapsed - self._vdrop_t0
-            dv   = self._vdrop_v0 - vbus_f               # total drop so far (V)
-            if dv > 2.0 and dt_s > 15.0:                 # need real signal
-                dvdt = dv / dt_s                          # V/s average discharge rate
+            dv   = self._vdrop_v0 - vbus_f
+            if dv > 2.0 and dt_s > 15.0:
+                dvdt = dv / dt_s
                 t_to_cutoff_s = (vbus_f - _SOC_V_CUTOFF) / dvdt
                 min_rem_v = max(0.0, t_to_cutoff_s / 60.0)
 
-        # ── Pick estimate ─────────────────────────────────────────────────
         if min_rem_i is not None and min_rem_v is not None:
-            min_rem  = min(min_rem_i, min_rem_v)          # conservative: take lower
+            min_rem  = min(min_rem_i, min_rem_v)
             src_tag  = ""
         elif min_rem_i is not None:
             min_rem  = min_rem_i
             src_tag  = ""
         elif min_rem_v is not None:
             min_rem  = min_rem_v
-            src_tag  = " (V)"                             # voltage-only indicator
+            src_tag  = " (V)"
         else:
             min_rem  = None
             src_tag  = ""
@@ -3776,20 +3882,18 @@ class MainWindow(QMainWindow):
         if min_rem is not None:
             time_str = f"{int(min_rem)}m {int((min_rem % 1) * 60):02d}s{src_tag}"
         elif INV_RUNNING:
-            time_str = "CALC…"                            # running but window not full yet
+            time_str = "CALC…"
         else:
             time_str = "STANDBY"
             min_rem  = 999.0
 
-        # Compute Predictive Analytics & Strategy Metrics
+        # Predictive Analytics & Strategy Metrics
         if not hasattr(self, '_analytics_engine'):
             self._analytics_engine = PredictiveAnalyticsEngine()
         analytics = self._analytics_engine.compute(s, soc_vtc6, i_eff)
         s.update(analytics)
 
-        # ── Persist analytics into the shared snapshot so SerialCSVLogger logs them ──
-        # The logger runs in a separate thread and reads rtt.latest_data_dict directly.
-        # Writing back here means the values appear in the CSV on the very next snapshot row.
+        # Persist analytics into shared snapshot so SerialCSVLogger logs them
         try:
             live_snap = rtt.get_latest_data().get('snapshot')
             if live_snap is not None:
@@ -3799,8 +3903,26 @@ class MainWindow(QMainWindow):
                     if _ak in analytics:
                         live_snap[_ak] = analytics[_ak]
         except Exception:
-            pass  # Never let analytics write-back crash the UI update loop
+            pass
 
+        self._last_soc_vtc6 = soc_vtc6
+        self._last_time_str = time_str
+        return soc_vtc6, time_str
+
+    def _render_overview_tab(self, s: dict, soc_vtc6: float, time_str: str):
+        rpm    = s.get('inv_rpm',           0)
+        vbus   = s.get('inv_dc_bus_V',      0)
+        vcell  = s.get('v_cell_min_mV',     0)
+        tpct   = s.get('torque_pct',        0)
+        icur   = s.get('inv_current_actual',0)
+        istate = s.get('inv_state',         0)
+        pre    = s.get('ok_precharge',      0)
+        ams    = s.get('ams_fsm_state',     0)
+        ierr   = s.get('inv_error',         0)
+        seq    = s.get('seq',               0)
+        tick   = s.get('tick_ms',           0)
+        tmax   = s.get('temp_max_modulo',  [0]*5)
+        max_t  = max((t for t in tmax if t != 0), default=0)
 
         tm2_val = s.get('inv_temp_motor2', s.get('inv_temp_pwrstg', 0))
 
@@ -3814,11 +3936,6 @@ class MainWindow(QMainWindow):
         self._ov_cur.set_value(f"{icur}")
         self._ov_vcell.set_value(f"{vcell}")
         self._ov_state.set_value(f"{istate}  {_STATE_SHORT_MAP.get(int(istate), '?')}")
-
-
-        self._mini_rpm.setText(f"{int(rpm):,} rpm")
-        self._mini_vbus.setText(f"{vbus} V")
-        self._mini_temp.setText(f"{max_t:.0f} ºC")
 
         self._ov_plot_rpm.update_plot(rpm)
         self._ov_plot_vbus.update_plot(vbus)
@@ -3842,12 +3959,11 @@ class MainWindow(QMainWindow):
 
         def _ind(lbl, text, on):
             lbl.setText(f"● {text}")
-            lbl.setStyleSheet(f"color:{'#00c853' if on else '#333'}; font-size:10px; font-weight:bold;")
+            lbl.setStyleSheet(f"color:{ISC_GREEN if on else '#52525b'}; font-size:11px; font-weight:bold; font-family:'Consolas', monospace;")
         _ind(self._ind_precharge, "PRECHARGE OK", bool(pre))
         _ind(self._ind_inv_ok,    f"INV {decode_inverter_state(istate)}", istate in _INV_ACTIVE_STATES)
         ams_name = f" ({AMS_FSM_STATE_MAP.get(ams, '')})" if ams in AMS_FSM_STATE_MAP else ""
         _ind(self._ind_ams,       f"AMS {ams}{ams_name}",   ams > 0)
-
 
         # Inverter fault decoder — pass istate for soft-fault substate awareness
         if ierr > 0:
@@ -3867,13 +3983,13 @@ class MainWindow(QMainWindow):
         self._signal_bars.set_lqi(lqi)
         self._lbl_lqi.setText(f"{lqi:.0f}%")
         if lqi >= 85:
-            self._lbl_lqi.setStyleSheet("color:#00c853; font-size:9px; font-family:'Courier New';")
+            self._lbl_lqi.setStyleSheet(f"color:{ISC_GREEN}; font-size:10px; font-family:'Consolas', monospace; font-weight:bold;")
         elif lqi >= 70:
-            self._lbl_lqi.setStyleSheet("color:#8bc34a; font-size:9px; font-family:'Courier New';")
+            self._lbl_lqi.setStyleSheet("color:#84cc16; font-size:10px; font-family:'Consolas', monospace; font-weight:bold;")
         elif lqi >= 50:
-            self._lbl_lqi.setStyleSheet("color:#f0b429; font-size:9px; font-family:'Courier New';")
+            self._lbl_lqi.setStyleSheet(f"color:{F1_WARNING}; font-size:10px; font-family:'Consolas', monospace; font-weight:bold;")
         else:
-            self._lbl_lqi.setStyleSheet("color:#ef4444; font-size:9px; font-family:'Courier New';")
+            self._lbl_lqi.setStyleSheet(f"color:{F1_ERROR}; font-size:10px; font-family:'Consolas', monospace; font-weight:bold;")
 
         # GPS live status
         gps_fix  = s.get('gps_has_fix', 0)
@@ -3887,13 +4003,17 @@ class MainWindow(QMainWindow):
                 f"GPS ✓  {gps_lat:+.5f}° {gps_lon:+.5f}°  {gps_spd:.1f} km/h  hdg:{gps_crs:.0f}°  [{gps_sats} sats]"
             )
             self._lbl_gps.setStyleSheet(
-                "color:#00c853; font-size:9px; font-family:'Courier New'; font-weight:bold;"
+                f"color:{ISC_GREEN}; font-size:10.5px; font-family:'Consolas', monospace; font-weight:bold;"
             )
         else:
             self._lbl_gps.setText(f"GPS NO FIX  [{gps_sats} sats]" if gps_sats else "GPS: NO FIX")
             self._lbl_gps.setStyleSheet(
-                "color:#555; font-size:9px; font-family:'Courier New'; font-weight:bold;"
+                f"color:{F1_MUTED}; font-size:10.5px; font-family:'Consolas', monospace; font-weight:bold;"
             )
+
+    def _update_overview(self, s: dict):
+        """Compatibility wrapper for overview updates."""
+        self._render_overview_tab(s, getattr(self, '_last_soc_vtc6', 0.0), getattr(self, '_last_time_str', 'STANDBY'))
 
     def _update_acu_overview(self, s: dict):
         acu = rtt.get_acu_matrix()
@@ -3979,56 +4099,70 @@ class MainWindow(QMainWindow):
                         max_v = v_cell
                         max_loc = (m, c)
 
-        # Fallback if CAN matrix not streamed yet: use snapshot per-module values
-        if not all_v and s.get('vmin_modulo'):
-            vm_mod = s.get('vmin_modulo', [0]*5)
-            vx_mod = s.get('vmax_modulo', [0]*5)
-            for m in range(5):
-                vmin_m = vm_mod[m] if m < len(vm_mod) else 0
-                vmax_m = vx_mod[m] if m < len(vx_mod) else 0
-                if vmin_m > 0:
+        v_cache = getattr(self, '_acu_v_cache', {})
+        self._table_voltages.setUpdatesEnabled(False)
+        try:
+            # Fallback if CAN matrix not streamed yet: use snapshot per-module values
+            if not all_v and s.get('vmin_modulo'):
+                vm_mod = s.get('vmin_modulo', [0]*5)
+                vx_mod = s.get('vmax_modulo', [0]*5)
+                for m in range(5):
+                    vmin_m = vm_mod[m] if m < len(vm_mod) else 0
+                    vmax_m = vx_mod[m] if m < len(vx_mod) else 0
+                    if vmin_m > 0:
+                        for c in range(19):
+                            v_synth = int(vmin_m + (vmax_m - vmin_m) * (c / 18.0)) if vmax_m > vmin_m else vmin_m
+                            all_v.append(v_synth)
+                            if v_synth < min_v: min_v = v_synth; min_loc = (m, c)
+                            if v_synth > max_v: max_v = v_synth; max_loc = (m, c)
+                            key = (m, c)
+                            text_str = str(v_synth)
+                            bg_hex = "#064e3b"
+                            fg_hex = "#e0e0e0"
+                            if v_cache.get(key) != (text_str, bg_hex, fg_hex):
+                                item = self._table_voltages.item(m, c)
+                                if item:
+                                    item.setText(text_str)
+                                    item.setBackground(QBrush(QColor(bg_hex)))
+                                    item.setForeground(QBrush(QColor(fg_hex)))
+                                v_cache[key] = (text_str, bg_hex, fg_hex)
+            elif all_v:
+                for m in range(5):
                     for c in range(19):
-                        v_synth = int(vmin_m + (vmax_m - vmin_m) * (c / 18.0)) if vmax_m > vmin_m else vmin_m
-                        all_v.append(v_synth)
-                        if v_synth < min_v: min_v = v_synth; min_loc = (m, c)
-                        if v_synth > max_v: max_v = v_synth; max_loc = (m, c)
-                        item = self._table_voltages.item(m, c)
-                        if item:
-                            item.setText(str(v_synth))
-                            item.setBackground(QBrush(QColor("#064e3b")))
-        elif all_v:
-            for m in range(5):
-                for c in range(19):
-                    v_cell = voltages[m][c]
-                    item = self._table_voltages.item(m, c)
-                    if not item:
-                        continue
-                    item.setText(str(v_cell) if v_cell > 0 else "0")
+                        v_cell = voltages[m][c]
+                        text_str = str(v_cell) if v_cell > 0 else "0"
+                        if v_cell == 0:
+                            bg_hex = "#18181b"
+                            fg_hex = "#666666"
+                        elif v_cell < 3000:
+                            bg_hex = "#7f1d1d"   # Critical red
+                            fg_hex = "#ffffff"
+                        elif v_cell < 3300:
+                            bg_hex = "#78350f"   # Warning amber
+                            fg_hex = "#fef08a"
+                        elif v_cell > 4200:
+                            bg_hex = "#581c87"   # Overvoltage purple
+                            fg_hex = "#ffffff"
+                        elif (m, c) == min_loc:
+                            bg_hex = "#0284c7"   # Highlight min in cyan
+                            fg_hex = "#ffffff"
+                        elif (m, c) == max_loc:
+                            bg_hex = "#0d9488"   # Highlight max in teal
+                            fg_hex = "#ffffff"
+                        else:
+                            bg_hex = "#064e3b"   # Nominal dark green
+                            fg_hex = "#e0e0e0"
 
-                    if v_cell == 0:
-                        bg = QColor("#18181b")
-                        fg = QColor("#666666")
-                    elif v_cell < 3000:
-                        bg = QColor("#7f1d1d")   # Critical red
-                        fg = QColor("#ffffff")
-                    elif v_cell < 3300:
-                        bg = QColor("#78350f")   # Warning amber
-                        fg = QColor("#fef08a")
-                    elif v_cell > 4200:
-                        bg = QColor("#581c87")   # Overvoltage purple
-                        fg = QColor("#ffffff")
-                    elif (m, c) == min_loc:
-                        bg = QColor("#0284c7")   # Highlight min in cyan
-                        fg = QColor("#ffffff")
-                    elif (m, c) == max_loc:
-                        bg = QColor("#0d9488")   # Highlight max in teal
-                        fg = QColor("#ffffff")
-                    else:
-                        bg = QColor("#064e3b")   # Nominal dark green
-                        fg = QColor("#e0e0e0")
-
-                    item.setBackground(QBrush(bg))
-                    item.setForeground(QBrush(fg))
+                        key = (m, c)
+                        if v_cache.get(key) != (text_str, bg_hex, fg_hex):
+                            item = self._table_voltages.item(m, c)
+                            if item:
+                                item.setText(text_str)
+                                item.setBackground(QBrush(QColor(bg_hex)))
+                                item.setForeground(QBrush(QColor(fg_hex)))
+                            v_cache[key] = (text_str, bg_hex, fg_hex)
+        finally:
+            self._table_voltages.setUpdatesEnabled(True)
 
         if all_v:
             v_spread = max_v - min_v
@@ -4055,51 +4189,67 @@ class MainWindow(QMainWindow):
                     if t_val < min_t: min_t = t_val
                     if t_val > max_t: max_t = t_val; hot_loc = (m, n)
 
-        # Fallback if CAN thermal matrix not streamed yet: use snapshot per-module tmax
-        if not all_t and s.get('temp_max_modulo'):
-            tmax_mod = s.get('temp_max_modulo', [0]*5)
-            for m in range(5):
-                tm = float(tmax_mod[m]) if m < len(tmax_mod) else 0.0
-                if tm > 0:
+        t_cache = getattr(self, '_acu_t_cache', {})
+        self._table_temps.setUpdatesEnabled(False)
+        try:
+            # Fallback if CAN thermal matrix not streamed yet: use snapshot per-module tmax
+            if not all_t and s.get('temp_max_modulo'):
+                tmax_mod = s.get('temp_max_modulo', [0]*5)
+                for m in range(5):
+                    tm = float(tmax_mod[m]) if m < len(tmax_mod) else 0.0
+                    if tm > 0:
+                        for n in range(38):
+                            t_synth = tm - random.uniform(0.5, 3.0)
+                            all_t.append(t_synth)
+                            if t_synth < min_t: min_t = t_synth
+                            if t_synth > max_t: max_t = t_synth; hot_loc = (m, n)
+                            key = (m, n)
+                            text_str = f"{t_synth:.0f}"
+                            bg_hex = "#064e3b"
+                            fg_hex = "#e0e0e0"
+                            if t_cache.get(key) != (text_str, bg_hex, fg_hex):
+                                item = self._table_temps.item(m, n)
+                                if item:
+                                    item.setText(text_str)
+                                    item.setBackground(QBrush(QColor(bg_hex)))
+                                    item.setForeground(QBrush(QColor(fg_hex)))
+                                t_cache[key] = (text_str, bg_hex, fg_hex)
+            elif all_t:
+                for m in range(5):
                     for n in range(38):
-                        t_synth = tm - random.uniform(0.5, 3.0)
-                        all_t.append(t_synth)
-                        if t_synth < min_t: min_t = t_synth
-                        if t_synth > max_t: max_t = t_synth; hot_loc = (m, n)
-                        item = self._table_temps.item(m, n)
-                        if item:
-                            item.setText(f"{t_synth:.0f}")
-                            item.setBackground(QBrush(QColor("#064e3b")))
-        elif all_t:
-            for m in range(5):
-                for n in range(38):
-                    t_val = temps[m][n]
-                    item = self._table_temps.item(m, n)
-                    if not item:
-                        continue
-                    if math.isnan(t_val) or t_val == -128:
-                        item.setText("—")
-                        item.setBackground(QBrush(QColor("#18181b")))
-                        item.setForeground(QBrush(QColor("#555555")))
-                    else:
-                        item.setText(f"{t_val:.0f}")
-                        if t_val >= 60.0:
-                            bg = QColor("#991b1b")   # Critical red (>60°C)
-                            fg = QColor("#ffffff")
-                        elif t_val >= 50.0:
-                            bg = QColor("#c2410c")   # Elevated orange (50..59°C)
-                            fg = QColor("#ffffff")
-                        elif t_val >= 40.0:
-                            bg = QColor("#b45309")   # Warm amber (40..49°C)
-                            fg = QColor("#fef08a")
-                        elif (m, n) == hot_loc:
-                            bg = QColor("#e11d48")   # Hotspot highlight
-                            fg = QColor("#ffffff")
+                        t_val = temps[m][n]
+                        if math.isnan(t_val) or t_val == -128:
+                            text_str = "—"
+                            bg_hex = "#18181b"
+                            fg_hex = "#555555"
                         else:
-                            bg = QColor("#065f46")   # Cool nominal green (<40°C)
-                            fg = QColor("#e0e0e0")
-                        item.setBackground(QBrush(bg))
-                        item.setForeground(QBrush(fg))
+                            text_str = f"{t_val:.0f}"
+                            if t_val >= 60.0:
+                                bg_hex = "#991b1b"   # Critical red (>60°C)
+                                fg_hex = "#ffffff"
+                            elif t_val >= 50.0:
+                                bg_hex = "#c2410c"   # Elevated orange (50..59°C)
+                                fg_hex = "#ffffff"
+                            elif t_val >= 40.0:
+                                bg_hex = "#b45309"   # Warm amber (40..49°C)
+                                fg_hex = "#fef08a"
+                            elif (m, n) == hot_loc:
+                                bg_hex = "#e11d48"   # Hotspot highlight
+                                fg_hex = "#ffffff"
+                            else:
+                                bg_hex = "#065f46"   # Cool nominal green (<40°C)
+                                fg_hex = "#e0e0e0"
+
+                        key = (m, n)
+                        if t_cache.get(key) != (text_str, bg_hex, fg_hex):
+                            item = self._table_temps.item(m, n)
+                            if item:
+                                item.setText(text_str)
+                                item.setBackground(QBrush(QColor(bg_hex)))
+                                item.setForeground(QBrush(QColor(fg_hex)))
+                            t_cache[key] = (text_str, bg_hex, fg_hex)
+        finally:
+            self._table_temps.setUpdatesEnabled(True)
 
         if all_t:
             avg_t = sum(all_t) / len(all_t)
@@ -4449,12 +4599,6 @@ class MainWindow(QMainWindow):
             return
         ts = datetime.now().strftime("%H:%M:%S")
         log_widget.append(f"[{ts}] {msg}")
-        doc = log_widget.document()
-        while doc.blockCount() > 30:
-            cur = log_widget.textCursor()
-            cur.movePosition(cur.Start)
-            cur.select(cur.BlockUnderCursor)
-            cur.removeSelectedText(); cur.deleteChar()
 
     def _speak_alert(self, text: str):
         # Run speech synthesis in a background daemon thread so it doesn't block PyQt GUI thread
@@ -4584,11 +4728,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_ax_tb') and hasattr(self, '_canvas_tb'):
             self._ax_tb.set_facecolor(F1_PANEL_BG)
             self._canvas_tb.figure.patch.set_facecolor(F1_PANEL_BG)
-            self._ax_tb.tick_params(labelsize=7.5, colors=txt_col)
+            self._ax_tb.tick_params(labelsize=8.5, colors=txt_col)
             self._ax_tb.grid(True, color=grid_col, alpha=0.5 if is_light else 0.35)
             for s in self._ax_tb.spines.values():
                 s.set_color(spine_col)
-            self._ax_tb.legend(fontsize=7, loc='upper left',
+            self._ax_tb.legend(fontsize=8, loc='upper left',
                                facecolor=F1_PANEL_BG, labelcolor=F1_TEXT,
                                edgecolor=spine_col, framealpha=0.9)
             self._canvas_tb.draw_idle()
@@ -4596,35 +4740,37 @@ class MainWindow(QMainWindow):
         # 4. Recursively update all child widgets
         def _restyle(w):
             if isinstance(w, MetricCard):
-                w._value.setStyleSheet(f"color:{F1_TEXT}; font-size:19px; font-weight:bold; background:transparent; border:none;")
+                w._value.setStyleSheet(f"color:{F1_TEXT}; font-size:22px; font-weight:bold; font-family:'Segoe UI', sans-serif; background:transparent; border:none;")
                 col = F1_ERROR if w._alerting else w._color
                 w._set_border(col)
-                w._title.setStyleSheet(f"color:{col}; font-size:9px; font-weight:bold; background:transparent; border:none;")
+                w._title.setStyleSheet(f"color:{col}; font-size:11px; font-weight:bold; letter-spacing:0.5px; background:transparent; border:none;")
+                if hasattr(w, '_unit') and w._unit:
+                    w._unit.setStyleSheet(f"color:{F1_MUTED}; font-size:10.5px; font-weight:bold; background:transparent; border:none;")
                 w.update()
 
             elif isinstance(w, MplCanvas):
                 w._ax.set_facecolor(F1_PANEL_BG)
                 w._canvas.figure.patch.set_facecolor(F1_PANEL_BG)
-                w._ax.tick_params(labelsize=7.5, colors=txt_col)
+                w._ax.tick_params(labelsize=8.5, colors=txt_col)
                 w._ax.grid(True, color=grid_col, alpha=0.5 if is_light else 0.35)
                 for s in w._ax.spines.values():
                     s.set_color(spine_col)
                 w._canvas.draw_idle()
                 
             elif isinstance(w, DroppablePlotPanel):
-                w._title_lbl.setStyleSheet(f"color:{ISC_GREEN if w._channel else ('#666' if is_light else '#888')}; font-size:9px; font-weight:bold; background:transparent; border:none;")
-                w._val_lbl.setStyleSheet(f"color:{ISC_GREEN}; font-size:15px; font-weight:bold; background:transparent; border:none;")
+                w._title_lbl.setStyleSheet(f"color:{ISC_GREEN if w._channel else ('#666' if is_light else F1_MUTED)}; font-size:10.5px; font-weight:bold; background:transparent; border:none;")
+                w._val_lbl.setStyleSheet(f"color:{ISC_GREEN}; font-size:17px; font-weight:bold; background:transparent; border:none;")
                 w.setStyleSheet(f"QFrame {{ background:{F1_PANEL_BG}; color:{F1_TEXT}; border:1px solid {'#ccc' if is_light else '#333'}; }}")
                 w._ax.set_facecolor(F1_PANEL_BG)
                 w._canvas.figure.patch.set_facecolor(F1_PANEL_BG)
-                w._ax.tick_params(labelsize=7.5, colors=txt_col)
+                w._ax.tick_params(labelsize=8.5, colors=txt_col)
                 w._ax.grid(True, color=grid_col, alpha=0.5 if is_light else 0.35)
                 for s in w._ax.spines.values():
                     s.set_color(spine_col)
                 w._canvas.draw_idle()
                 
             elif isinstance(w, QTextEdit):
-                w.setStyleSheet(f"background:{F1_PANEL_BG}; color:{F1_TEXT}; border:1px solid {'#ccc' if is_light else '#333'}; font-family:'Courier New'; font-size:9px;")
+                w.setStyleSheet(f"background:{F1_PANEL_BG}; color:{F1_TEXT}; border:1px solid {'#ccc' if is_light else '#333'}; font-family:'Consolas', 'Courier New', monospace; font-size:11px;")
                 
             elif isinstance(w, QComboBox) or isinstance(w, QLineEdit):
                 w.setStyleSheet(self.get_input_style())
@@ -5603,7 +5749,7 @@ class AMSSimulatorThread(QThread):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setFont(QFont("Segoe UI", 9))
+    app.setFont(QFont("Segoe UI", 10))
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
