@@ -52,7 +52,8 @@ from PyQt5.QtWidgets import (
     QWidget, QLabel, QPushButton, QLineEdit, QComboBox, QTextEdit,
     QMessageBox, QTabWidget, QFrame, QGroupBox, QCheckBox,
     QListWidget, QListWidgetItem, QDialog, QSizePolicy, QInputDialog,
-    QProgressBar, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView
+    QProgressBar, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView,
+    QScrollArea
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -66,6 +67,15 @@ try:
     DEMO_AVAILABLE = True
 except ImportError:
     DEMO_AVAILABLE = False
+
+# ── Multi-log sync & Marple exporter engines ──────────────────────────────────
+try:
+    from core.sync import MultiLogSynchronizer, SyncSummary
+    from core.marple_exporter import MarpleExportWorker, export_session_to_marple_async
+    from ui.modals import PostMergeConfirmationModal, ManualMarpleExportDialog
+    CORE_MODULES_OK = True
+except ImportError:
+    CORE_MODULES_OK = False
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  VERSION  — patched automatically by GitHub Actions on each release tag
@@ -2225,13 +2235,30 @@ class SessionViewerWindow(QWidget):
         btn.setStyleSheet(f"background:{F1_MID_BG}; color:{ISC_GREEN}; border:1px solid {ISC_GREEN}; padding:4px 8px;")
         btn.clicked.connect(self._refresh)
         side.addWidget(btn)
+
+        btn_marple = QPushButton("🚀 Export to Marple")
+        btn_marple.setStyleSheet(f"background:{ISC_GREEN}; color:{F1_DARK_BG}; font-weight:bold; border:none; padding:5px 8px; border-radius:2px; font-size:10px;")
+        btn_marple.setToolTip("Upload the selected session file directly to Marple Data")
+        btn_marple.clicked.connect(self._export_to_marple)
+        side.addWidget(btn_marple)
+
         sw = QWidget(); sw.setLayout(side); sw.setFixedWidth(240)
         h.addWidget(sw)
+
         # Content
         right = QVBoxLayout()
+        header_row = QHBoxLayout()
         self._info = QLabel("Double-click a session to load.")
         self._info.setStyleSheet("color:#555; padding:8px;")
-        right.addWidget(self._info)
+        header_row.addWidget(self._info, stretch=1)
+
+        self._btn_export_curr = QPushButton("🚀 Export to Marple")
+        self._btn_export_curr.setStyleSheet(f"background:{F1_PANEL_BG}; color:{ISC_GREEN}; border:1px solid {ISC_GREEN}; padding:4px 10px; font-weight:bold; border-radius:2px; font-size:10px;")
+        self._btn_export_curr.setEnabled(False)
+        self._btn_export_curr.clicked.connect(self._export_to_marple)
+        header_row.addWidget(self._btn_export_curr)
+
+        right.addLayout(header_row)
         self._txt = QTextEdit()
         self._txt.setReadOnly(True)
         self._txt.setStyleSheet(
@@ -2239,6 +2266,7 @@ class SessionViewerWindow(QWidget):
         right.addWidget(self._txt)
         rw = QWidget(); rw.setLayout(right)
         h.addWidget(rw)
+        self._loaded_path = None
         self._refresh()
 
     def _refresh(self):
@@ -2249,13 +2277,38 @@ class SessionViewerWindow(QWidget):
             self._list.addItem(item)
 
     def _load(self, item: QListWidgetItem):
-        data = rtt.load_excel_session(Path(item.data(Qt.UserRole)))
+        path = Path(item.data(Qt.UserRole))
+        self._loaded_path = path
+        data = rtt.load_excel_session(path)
         if 'Main' in data:
             df = data['Main']
-            self._info.setText(f"{Path(item.data(Qt.UserRole)).name} — {len(df)} rows × {len(df.columns)} cols")
+            self._info.setText(f"{path.name} — {len(df)} rows × {len(df.columns)} cols")
             self._txt.setPlainText(df.to_string(max_rows=60))
+            self._btn_export_curr.setEnabled(True)
         else:
             self._info.setText("Failed to load.")
+            self._btn_export_curr.setEnabled(False)
+
+    def _export_to_marple(self):
+        path = None
+        if self._loaded_path and self._loaded_path.exists():
+            path = self._loaded_path
+        else:
+            curr = self._list.currentItem()
+            if curr:
+                p = Path(curr.data(Qt.UserRole))
+                if p.exists():
+                    path = p
+
+        if not path:
+            QMessageBox.information(self, "Export to Marple", "Please select a session from the list to export.")
+            return
+
+        if CORE_MODULES_OK:
+            dlg = ManualMarpleExportDialog(path, parent=self)
+            dlg.exec_()
+        else:
+            QMessageBox.warning(self, "Module Missing", "Marple exporter module is not loaded.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2291,6 +2344,8 @@ class PostRaceWindow(QWidget):
         self._session_path: Optional[Path] = None
         self._gps_file_path: Optional[Path] = None
         self._ams_file_path: Optional[Path] = None
+        self._imu_file_path: Optional[Path] = None
+        self._already_merged: bool = False
         self._build()
         self._refresh_sessions()
 
@@ -2301,14 +2356,14 @@ class PostRaceWindow(QWidget):
         root.setContentsMargins(14, 14, 14, 14)
 
         # ── Title ─────────────────────────────────────────────────────────────
-        title = QLabel("POST-RACE DATA INJECTION")
+        title = QLabel("POST-RACE DATA INJECTION & SYNCHRONIZATION")
         title.setStyleSheet(
             f"color:{ISC_GREEN}; font-size:16px; font-weight:bold; "
             f"border-bottom:2px solid {ISC_GREEN}; padding-bottom:6px;")
         root.addWidget(title)
 
         sub = QLabel(
-            "Merge data recorded on the car's micro-SD card into an existing session CSV.")
+            "Synchronize multi-source sensor logs (GPS, AMS Temperatures, and External Chassis IMU) into an existing session CSV.")
         sub.setStyleSheet("color:#555; font-size:10px;")
         root.addWidget(sub)
 
@@ -2339,12 +2394,43 @@ class PostRaceWindow(QWidget):
         self._session_info.setStyleSheet("color:#444; font-size:9px; font-family:'Courier New';")
         root.addWidget(self._session_info)
 
-        # ── Two injection panels ───────────────────────────────────────────────
+        # ── Three injection panels ─────────────────────────────────────────────
         panels = QHBoxLayout()
         panels.setSpacing(12)
         panels.addWidget(self._build_gps_panel(), stretch=1)
         panels.addWidget(self._build_ams_panel(), stretch=1)
+        panels.addWidget(self._build_imu_panel(), stretch=1)
         root.addLayout(panels, stretch=1)
+
+        # ── Unified Sync Action Bar ──────────────────────────────────────────
+        act_row = QHBoxLayout()
+        act_row.setSpacing(10)
+
+        self._btn_sync_all = QPushButton("⚡  Run Multi-Log Synchronization (IMU + AMS + GPS)")
+        self._btn_sync_all.setStyleSheet(f"""
+            QPushButton {{
+                background: {ISC_GREEN}; color: {F1_DARK_BG}; font-size: 11px; font-weight: bold;
+                border: none; border-radius: 3px; padding: 9px 18px;
+            }}
+            QPushButton:hover {{ background: #00a000; }}
+            QPushButton:disabled {{ background: #222; color: #555; }}
+        """)
+        self._btn_sync_all.clicked.connect(self._run_multi_sync)
+        act_row.addWidget(self._btn_sync_all)
+
+        self._btn_marple_direct = QPushButton("🚀  Export Selected Session to Marple")
+        self._btn_marple_direct.setStyleSheet(f"""
+            QPushButton {{
+                background: {F1_PANEL_BG}; color: {ISC_GREEN}; font-size: 11px; font-weight: bold;
+                border: 1px solid {ISC_GREEN}; border-radius: 3px; padding: 9px 14px;
+            }}
+            QPushButton:hover {{ background: #264a26; }}
+        """)
+        self._btn_marple_direct.clicked.connect(self._export_to_marple)
+        act_row.addWidget(self._btn_marple_direct)
+        act_row.addStretch()
+        root.addLayout(act_row)
+
 
         # ── Log area ──────────────────────────────────────────────────────────
         log_box = QGroupBox("IMPORT LOG")
@@ -2486,6 +2572,57 @@ class PostRaceWindow(QWidget):
 
         return box
 
+    def _build_imu_panel(self) -> QGroupBox:
+        """External IMU data injection panel."""
+        box = QGroupBox("IMU / MOTION DYNAMICS")
+        box.setStyleSheet(
+            f"QGroupBox {{ color:{F1_PURPLE}; border:1px solid {F1_PURPLE}; "
+            f"margin-top:14px; font-size:10px; font-weight:bold; }}"
+            f"QGroupBox::title {{ subcontrol-origin:margin; "
+            f"subcontrol-position:top left; padding:0 6px; "
+            f"color:{F1_PURPLE}; background:{F1_DARK_BG}; }}")
+        v = QVBoxLayout(box)
+        v.setSpacing(8)
+        v.setContentsMargins(10, 14, 10, 10)
+
+        desc = QLabel(
+            "Select the external IMU / chassis dynamics log file from the micro-SD card.\n"
+            "When merged, integrates 6-DOF accelerations (ax, ay, az) and gyros (gx, gy, gz).")
+        desc.setStyleSheet(f"color:{F1_TEXT}; font-size:9px;")
+        desc.setWordWrap(True)
+        v.addWidget(desc)
+
+        file_row = QHBoxLayout()
+        self._imu_file_lbl = QLabel("No file selected.")
+        self._imu_file_lbl.setStyleSheet("color:#555; font-size:9px; font-family:'Courier New';")
+        file_row.addWidget(self._imu_file_lbl, stretch=1)
+
+        btn_browse = QPushButton("Browse…")
+        btn_browse.setStyleSheet(
+            f"background:{F1_MID_BG}; color:{F1_PURPLE}; border:1px solid {F1_PURPLE}; "
+            f"padding:4px 10px; font-size:10px; border-radius:2px;")
+        btn_browse.clicked.connect(self._browse_imu)
+        file_row.addWidget(btn_browse)
+        v.addLayout(file_row)
+
+        v.addStretch()
+
+        self._imu_status = QLabel("Ready.")
+        self._imu_status.setStyleSheet("color:#555; font-size:9px; font-family:'Courier New';")
+        self._imu_status.setWordWrap(True)
+        v.addWidget(self._imu_status)
+
+        btn_import = QPushButton("⬇  Import IMU Data")
+        btn_import.setStyleSheet(
+            f"QPushButton {{ background:{F1_PURPLE}; color:{F1_DARK_BG}; border:none; "
+            f"border-radius:3px; padding:7px 14px; font-size:11px; font-weight:bold; }}"
+            f"QPushButton:hover {{ background:#c084fc; }}"
+            f"QPushButton:disabled {{ background:#3b0764; color:#555; }}")
+        btn_import.clicked.connect(self._import_imu)
+        v.addWidget(btn_import)
+
+        return box
+
     # ── Session list helpers ──────────────────────────────────────────────────
     def _refresh_sessions(self):
         self._session_combo.clear()
@@ -2498,6 +2635,13 @@ class PostRaceWindow(QWidget):
         for s in sessions:
             self._session_combo.addItem(s.name, str(s))
         self._on_session_changed(0)
+
+    def _refresh_sessions_and_select(self, target_path: Path):
+        self._refresh_sessions()
+        for idx in range(self._session_combo.count()):
+            if self._session_combo.itemText(idx) == target_path.name:
+                self._session_combo.setCurrentIndex(idx)
+                break
 
     def _on_session_changed(self, idx: int):
         path_str = self._session_combo.currentData()
@@ -2529,7 +2673,7 @@ class PostRaceWindow(QWidget):
             self._gps_file_lbl.setText(self._gps_file_path.name)
             self._gps_file_lbl.setStyleSheet(
                 f"color:{F1_BLUE}; font-size:9px; font-family:'Courier New';")
-            self._gps_status.setText("File selected — click Import to merge.")
+            self._gps_status.setText("File selected — click Import or Run Multi-Log Sync.")
             self._gps_status.setStyleSheet(
                 f"color:{ISC_GREEN}; font-size:9px; font-family:'Courier New';")
 
@@ -2543,11 +2687,70 @@ class PostRaceWindow(QWidget):
             self._ams_file_lbl.setText(self._ams_file_path.name)
             self._ams_file_lbl.setStyleSheet(
                 f"color:{F1_WARNING}; font-size:9px; font-family:'Courier New';")
-            self._ams_status.setText("File selected — click Import to merge.")
+            self._ams_status.setText("File selected — click Import or Run Multi-Log Sync.")
             self._ams_status.setStyleSheet(
                 f"color:{ISC_GREEN}; font-size:9px; font-family:'Courier New';")
 
-    # ── Import handlers ───────────────────────────────────────────────────────
+    def _browse_imu(self):
+        from PyQt5.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select External IMU log file", "",
+            "CSV / Text files (*.csv *.txt *.log);;All files (*.*)")
+        if path:
+            self._imu_file_path = Path(path)
+            self._imu_file_lbl.setText(self._imu_file_path.name)
+            self._imu_file_lbl.setStyleSheet(
+                f"color:{F1_PURPLE}; font-size:9px; font-family:'Courier New';")
+            self._imu_status.setText("File selected — click Import or Run Multi-Log Sync.")
+            self._imu_status.setStyleSheet(
+                f"color:{ISC_GREEN}; font-size:9px; font-family:'Courier New';")
+
+    # ── Import & Multi-Log Sync handlers ──────────────────────────────────────
+    def _run_multi_sync(self):
+        """Execute full multi-log synchronization (IMU + AMS + GPS) with post-merge confirmation modal."""
+        if not self._session_path:
+            QMessageBox.warning(self, "No session", "Please select a session CSV first.")
+            return
+        if not (self._gps_file_path or self._ams_file_path or self._imu_file_path):
+            QMessageBox.warning(self, "No auxiliary logs", "Please select at least one auxiliary log file to merge (GPS, AMS, or IMU).")
+            return
+
+        self._log_append(f"[SYNC] Running unified multi-log synchronization for {self._session_path.name}...")
+        QApplication.processEvents()
+
+        new_path = self._session_path if self._session_path.stem.endswith('_merged') else self._session_path.with_name(f"{self._session_path.stem}_merged{self._session_path.suffix}")
+        utc_off = self._UTC_OFFSETS[self._utc_offset_combo.currentIndex()][1]
+
+        if CORE_MODULES_OK:
+            try:
+                sync_engine = MultiLogSynchronizer()
+                merged_df, summary = sync_engine.synchronize(
+                    session_input=self._session_path,
+                    imu_input=self._imu_file_path,
+                    ams_input=self._ams_file_path,
+                    gps_input=self._gps_file_path,
+                    utc_offset_hours=utc_off,
+                    output_path=new_path,
+                )
+                self._session_path = new_path
+                self._already_merged = True
+                self._refresh_sessions_and_select(new_path)
+
+                for name, stream in summary.streams.items():
+                    if stream.success:
+                        self._log_append(f"[{name}] ✓ {stream.message}")
+                    else:
+                        self._log_append(f"[{name}] ✗ {stream.message}")
+
+                modal = PostMergeConfirmationModal(summary, parent=self)
+                modal.exec_()
+            except Exception as exc:
+                logger.exception("Unified synchronization failed")
+                self._log_append(f"[SYNC] Error: {exc}")
+                QMessageBox.critical(self, "Sync Error", f"Unified synchronization failed:\n{exc}")
+        else:
+            QMessageBox.critical(self, "Module Missing", "core.sync module is not loaded.")
+
     def _import_gps(self):
         if not self._session_path:
             QMessageBox.warning(self, "No session", "Please select a session CSV first.")
@@ -2566,22 +2769,44 @@ class PostRaceWindow(QWidget):
             f"color:{F1_WARNING}; font-size:9px; font-family:'Courier New';")
         QApplication.processEvents()
 
-        ok, msg, new_path = rtt.merge_gps_into_session(
-            self._session_path, self._gps_file_path, utc_offset_hours=utc_off)
+        new_path = self._session_path if self._session_path.stem.endswith('_merged') else self._session_path.with_name(f"{self._session_path.stem}_merged{self._session_path.suffix}")
 
-        if ok:
-            self._session_path = new_path
-            self._gps_status.setText(f"✓  {msg}")
-            self._gps_status.setStyleSheet(
-                f"color:{ISC_GREEN}; font-size:9px; font-family:'Courier New';")
-            self._log_append(f"[GPS] ✓ {msg}")
-            # Refresh session info (size/rows may have changed)
-            self._on_session_changed(self._session_combo.currentIndex())
+        if CORE_MODULES_OK:
+            sync_engine = MultiLogSynchronizer()
+            merged_df, summary = sync_engine.synchronize(
+                session_input=self._session_path,
+                gps_input=self._gps_file_path,
+                utc_offset_hours=utc_off,
+                output_path=new_path,
+            )
+            gps_res = summary.streams.get('GPS')
+            if gps_res and gps_res.success:
+                self._session_path = new_path
+                self._already_merged = True
+                self._gps_status.setText(f"✓  {gps_res.message}")
+                self._gps_status.setStyleSheet(f"color:{ISC_GREEN}; font-size:9px; font-family:'Courier New';")
+                self._log_append(f"[GPS] ✓ {gps_res.message}")
+                self._refresh_sessions_and_select(new_path)
+                modal = PostMergeConfirmationModal(summary, parent=self)
+                modal.exec_()
+            else:
+                err = gps_res.message if gps_res else "GPS sync error"
+                self._gps_status.setText(f"✗  {err}")
+                self._gps_status.setStyleSheet(f"color:{F1_ERROR}; font-size:9px; font-family:'Courier New';")
+                self._log_append(f"[GPS] ✗ {err}")
         else:
-            self._gps_status.setText(f"✗  {msg}")
-            self._gps_status.setStyleSheet(
-                f"color:{F1_ERROR}; font-size:9px; font-family:'Courier New';")
-            self._log_append(f"[GPS] ✗ {msg}")
+            ok, msg, res_path = rtt.merge_gps_into_session(
+                self._session_path, self._gps_file_path, utc_offset_hours=utc_off)
+            if ok:
+                self._session_path = res_path
+                self._gps_status.setText(f"✓  {msg}")
+                self._gps_status.setStyleSheet(f"color:{ISC_GREEN}; font-size:9px; font-family:'Courier New';")
+                self._log_append(f"[GPS] ✓ {msg}")
+                self._refresh_sessions_and_select(res_path)
+            else:
+                self._gps_status.setText(f"✗  {msg}")
+                self._gps_status.setStyleSheet(f"color:{F1_ERROR}; font-size:9px; font-family:'Courier New';")
+                self._log_append(f"[GPS] ✗ {msg}")
 
     def _import_ams(self):
         if not self._session_path:
@@ -2597,28 +2822,101 @@ class PostRaceWindow(QWidget):
             f"color:{F1_WARNING}; font-size:9px; font-family:'Courier New';")
         QApplication.processEvents()
 
-        ok, msg, new_path = rtt.merge_ams_temps_into_session(self._session_path, self._ams_file_path)
+        new_path = self._session_path if self._session_path.stem.endswith('_merged') else self._session_path.with_name(f"{self._session_path.stem}_merged{self._session_path.suffix}")
 
-        if ok:
-            self._session_path = new_path
-            self._ams_status.setText(f"✓  {msg}")
-            self._ams_status.setStyleSheet(
-                f"color:{ISC_GREEN}; font-size:9px; font-family:'Courier New';")
-            self._log_append(f"[AMS] ✓ {msg}")
-            self._on_session_changed(self._session_combo.currentIndex())
+        if CORE_MODULES_OK:
+            sync_engine = MultiLogSynchronizer()
+            merged_df, summary = sync_engine.synchronize(
+                session_input=self._session_path,
+                ams_input=self._ams_file_path,
+                output_path=new_path,
+            )
+            ams_res = summary.streams.get('AMS')
+            if ams_res and ams_res.success:
+                self._session_path = new_path
+                self._already_merged = True
+                self._ams_status.setText(f"✓  {ams_res.message}")
+                self._ams_status.setStyleSheet(f"color:{ISC_GREEN}; font-size:9px; font-family:'Courier New';")
+                self._log_append(f"[AMS] ✓ {ams_res.message}")
+                self._refresh_sessions_and_select(new_path)
+                modal = PostMergeConfirmationModal(summary, parent=self)
+                modal.exec_()
+            else:
+                err = ams_res.message if ams_res else "AMS sync error"
+                self._ams_status.setText(f"✗  {err}")
+                self._ams_status.setStyleSheet(f"color:{F1_ERROR}; font-size:9px; font-family:'Courier New';")
+                self._log_append(f"[AMS] ✗ {err}")
         else:
-            self._ams_status.setText(f"✗  {msg}")
-            self._ams_status.setStyleSheet(
-                f"color:{F1_ERROR}; font-size:9px; font-family:'Courier New';")
-            self._log_append(f"[AMS] ✗ {msg}")
+            ok, msg, res_path = rtt.merge_ams_temps_into_session(self._session_path, self._ams_file_path)
+            if ok:
+                self._session_path = res_path
+                self._ams_status.setText(f"✓  {msg}")
+                self._ams_status.setStyleSheet(f"color:{ISC_GREEN}; font-size:9px; font-family:'Courier New';")
+                self._log_append(f"[AMS] ✓ {msg}")
+                self._refresh_sessions_and_select(res_path)
+            else:
+                self._ams_status.setText(f"✗  {msg}")
+                self._ams_status.setStyleSheet(f"color:{F1_ERROR}; font-size:9px; font-family:'Courier New';")
+                self._log_append(f"[AMS] ✗ {msg}")
+
+    def _import_imu(self):
+        if not self._session_path:
+            QMessageBox.warning(self, "No session", "Please select a session CSV first.")
+            return
+        if not self._imu_file_path:
+            QMessageBox.warning(self, "No IMU file", "Please browse to an IMU log file first.")
+            return
+
+        self._log_append(f"[IMU] Merging {self._imu_file_path.name} → {self._session_path.name}")
+        self._imu_status.setText("Merging… please wait.")
+        self._imu_status.setStyleSheet(f"color:{F1_WARNING}; font-size:9px; font-family:'Courier New';")
+        QApplication.processEvents()
+
+        new_path = self._session_path if self._session_path.stem.endswith('_merged') else self._session_path.with_name(f"{self._session_path.stem}_merged{self._session_path.suffix}")
+
+        if CORE_MODULES_OK:
+            sync_engine = MultiLogSynchronizer()
+            merged_df, summary = sync_engine.synchronize(
+                session_input=self._session_path,
+                imu_input=self._imu_file_path,
+                output_path=new_path,
+            )
+            imu_res = summary.streams.get('IMU')
+            if imu_res and imu_res.success:
+                self._session_path = new_path
+                self._already_merged = True
+                self._imu_status.setText(f"✓  {imu_res.message}")
+                self._imu_status.setStyleSheet(f"color:{ISC_GREEN}; font-size:9px; font-family:'Courier New';")
+                self._log_append(f"[IMU] ✓ {imu_res.message}")
+                self._refresh_sessions_and_select(new_path)
+                modal = PostMergeConfirmationModal(summary, parent=self)
+                modal.exec_()
+            else:
+                err = imu_res.message if imu_res else "IMU sync error"
+                self._imu_status.setText(f"✗  {err}")
+                self._imu_status.setStyleSheet(f"color:{F1_ERROR}; font-size:9px; font-family:'Courier New';")
+                self._log_append(f"[IMU] ✗ {err}")
+        else:
+            QMessageBox.warning(self, "Module Missing", "core.sync is not loaded.")
+
+    def _export_to_marple(self):
+        """Export the currently selected session directly to Marple Data."""
+        if not self._session_path or not self._session_path.exists():
+            QMessageBox.warning(self, "No Session", "Please select a valid session CSV first.")
+            return
+        if CORE_MODULES_OK:
+            dlg = ManualMarpleExportDialog(self._session_path, parent=self)
+            dlg.exec_()
+        else:
+            QMessageBox.warning(self, "Module Missing", "Marple exporter is not loaded.")
 
     def _log_append(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
         self._log.append(f"[{ts}] {msg}")
 
     def closeEvent(self, event):
-        # Automatically integrate selected files when closing the post-race window
-        if self._session_path:
+        # Automatically integrate selected files when closing the post-race window (only if not already merged)
+        if self._session_path and not getattr(self, '_already_merged', False):
             merged_any = False
             gps_msg = ""
             ams_msg = ""
@@ -2652,6 +2950,7 @@ class PostRaceWindow(QWidget):
                     f"Selected files have been integrated into: {self._session_path.name}\n\n"
                     f"{gps_msg}{ams_msg}")
         event.accept()
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2911,8 +3210,8 @@ class MainWindow(QMainWindow):
         return f"""
             QPushButton {{
                 background: {bg}; color: {fg}; border: {br};
-                border-radius: 4px; padding: 6px 13px;
-                font-size: 11.5px; font-weight: bold;
+                border-radius: 4px; padding: 4px 10px;
+                font-size: 11px; font-weight: bold;
                 font-family: 'Segoe UI', sans-serif;
             }}
             QPushButton:hover {{ background: {hbg}; color: {hfg}; }}
@@ -2942,6 +3241,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(f"""
             QMainWindow {{ background:{F1_DARK_BG}; }}
             QTabWidget::pane {{ border:1.5px solid {ISC_GREEN}; background:{F1_DARK_BG}; }}
+            QScrollArea {{ background:{F1_DARK_BG}; border:none; }}
+            QScrollArea > QWidget {{ background:{F1_DARK_BG}; }}
+            QScrollArea > QWidget > QWidget {{ background:{F1_DARK_BG}; }}
             QTabBar::tab {{
                 background:{F1_MID_BG}; color:{F1_TEXT};
                 padding:9px 24px; margin-right:2px;
@@ -2967,12 +3269,16 @@ class MainWindow(QMainWindow):
             QScrollBar:vertical {{ background:{F1_DARK_BG}; width:8px; border-radius:4px; }}
             QScrollBar::handle:vertical {{ background:#3f3f46; border-radius:4px; min-height:20px; }}
             QScrollBar::handle:vertical:hover {{ background:#52525b; }}
+            QScrollBar:horizontal {{ background:{F1_DARK_BG}; height:8px; border-radius:4px; }}
+            QScrollBar::handle:horizontal {{ background:#3f3f46; border-radius:4px; min-width:20px; }}
+            QScrollBar::handle:horizontal:hover {{ background:#52525b; }}
         """)
 
     # ── UI construction ───────────────────────────────────────────────────────
     def _build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
+        self.setMinimumSize(1100, 650)
         vbox = QVBoxLayout(root)
         vbox.setSpacing(4)
         vbox.setContentsMargins(8, 8, 8, 8)
@@ -2982,14 +3288,31 @@ class MainWindow(QMainWindow):
         self._alert_banner = AlertBanner()
         vbox.addWidget(self._alert_banner)
 
+        def _wrap_scroll(w: QWidget) -> QScrollArea:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            scroll.setStyleSheet(f"""
+                QScrollArea {{ background: {F1_DARK_BG}; border: none; }}
+                QScrollArea > QWidget > QWidget {{ background: {F1_DARK_BG}; }}
+            """)
+            if scroll.viewport():
+                scroll.viewport().setStyleSheet(f"background: {F1_DARK_BG}; border: none;")
+            w.setAttribute(Qt.WA_StyledBackground, True)
+            w.setStyleSheet(f"background: {F1_DARK_BG};")
+            scroll.setWidget(w)
+            return scroll
+
         self._tabs = QTabWidget()
         self._tabs.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        self._tabs.addTab(self._tab_overview(),      "Overview")
-        self._tabs.addTab(self._tab_acu_overview(),  "Full ACU Overview")
-        self._tabs.addTab(self._tab_customize(),     "Customize")
-        self._tabs.addTab(self._tab_powertrain(),    "Powertrain")
-        self._tabs.addTab(self._tab_dynamics(),      "Dynamics")
-        self._tabs.addTab(self._tab_post_race(),     "Post-Race")
+        self._tabs.addTab(_wrap_scroll(self._tab_overview()),     "Overview")
+        self._tabs.addTab(_wrap_scroll(self._tab_acu_overview()), "Full ACU Overview")
+        self._tabs.addTab(_wrap_scroll(self._tab_customize()),    "Customize")
+        self._tabs.addTab(_wrap_scroll(self._tab_powertrain()),   "Powertrain")
+        self._tabs.addTab(_wrap_scroll(self._tab_dynamics()),     "Dynamics")
+        self._tabs.addTab(_wrap_scroll(self._tab_post_race()),    "Post-Race")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         vbox.addWidget(self._tabs, stretch=10)
 
@@ -3005,7 +3328,7 @@ class MainWindow(QMainWindow):
         bar = QFrame()
         self._top_bar = bar
         bar.setStyleSheet(f"QFrame {{ background:{F1_MID_BG}; border-radius:4px; }}")
-        bar.setFixedHeight(98)
+        bar.setFixedHeight(94)
         h = QHBoxLayout(bar)
         h.setSpacing(10)
         h.setContentsMargins(8, 5, 8, 5)
@@ -3074,32 +3397,44 @@ class MainWindow(QMainWindow):
         h.addWidget(self._vsep())
 
         # Buttons
-        bg = QGridLayout(); bg.setSpacing(4)
+        bg = QGridLayout()
+        bg.setSpacing(5)
+        bg.setContentsMargins(0, 2, 0, 2)
+
         self._btn_start = QPushButton("START")
         self._btn_start.setStyleSheet(self.get_button_style('accent'))
+        self._btn_start.setFixedHeight(30)
+        self._btn_start.setMinimumWidth(75)
         self._btn_start.clicked.connect(self._start)
         bg.addWidget(self._btn_start, 0, 0)
 
         self._btn_stop = QPushButton("STOP")
         self._btn_stop.setStyleSheet(self.get_button_style())
+        self._btn_stop.setFixedHeight(30)
+        self._btn_stop.setMinimumWidth(75)
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._stop)
         bg.addWidget(self._btn_stop, 0, 1)
 
+        btn_post = QPushButton("Post-Race")
+        btn_post.setStyleSheet(self.get_button_style())
+        btn_post.setFixedHeight(30)
+        btn_post.setMinimumWidth(85)
+        btn_post.clicked.connect(self._open_post_race)
+        bg.addWidget(btn_post, 0, 2)
+
         self._btn_settings = QPushButton("Settings")
         self._btn_settings.setStyleSheet(self.get_button_style())
+        self._btn_settings.setFixedHeight(28)
+        self._btn_settings.setMinimumWidth(75)
         self._btn_settings.clicked.connect(self._open_settings)
         bg.addWidget(self._btn_settings, 1, 0)
 
-        btn_post = QPushButton("Post-Race")
-        btn_post.setStyleSheet(self.get_button_style())
-        btn_post.clicked.connect(self._open_post_race)
-        bg.addWidget(btn_post, 1, 1)
-
         self._btn_theme = QPushButton("☀️  Light" if self.theme_mode == "dark" else "🌙  Dark")
         self._btn_theme.setStyleSheet(self.get_button_style())
+        self._btn_theme.setFixedHeight(28)
         self._btn_theme.clicked.connect(self._toggle_theme)
-        bg.addWidget(self._btn_theme, 2, 0, 1, 2)
+        bg.addWidget(self._btn_theme, 1, 1, 1, 2)
 
         h.addLayout(bg)
         return bar
@@ -3107,6 +3442,8 @@ class MainWindow(QMainWindow):
     # ── Tab 1 — Overview ──────────────────────────────────────────────────────
     def _tab_overview(self) -> QWidget:
         w = QWidget()
+        w.setAttribute(Qt.WA_StyledBackground, True)
+        w.setStyleSheet(f"background: {F1_DARK_BG};")
         v = QVBoxLayout(w); v.setSpacing(6); v.setContentsMargins(8,8,8,8)
 
         # Metric cards row (10 cards)
@@ -3487,9 +3824,9 @@ class MainWindow(QMainWindow):
 
         # Driver signals
         dsb = QGroupBox("DRIVER & CONTROL SIGNALS")
-        dsv = QVBoxLayout(dsb); dsv.setSpacing(4)
+        dsg = QGridLayout(dsb); dsg.setSpacing(4); dsg.setContentsMargins(6, 12, 6, 6)
         def _mc(t, u="", c=ISC_GREEN):
-            card = MetricCard(t, u, c); dsv.addWidget(card); return card
+            return MetricCard(t, u, c)
         self._dyn_apps1  = _mc("APPS 1 (raw)")
         self._dyn_apps2  = _mc("APPS 2 (raw)")
         self._dyn_brake  = _mc("Brake (raw)",   c=F1_ERROR)
@@ -3498,6 +3835,15 @@ class MainWindow(QMainWindow):
         self._dyn_ev23   = _mc("EV 2/3")
         self._dyn_t11    = _mc("T11 8/9")
         self._dyn_state  = _mc("Ctrl State",    c=F1_BLUE)
+
+        cards = [
+            (self._dyn_apps1, 0, 0), (self._dyn_apps2, 0, 1),
+            (self._dyn_brake, 1, 0), (self._dyn_torque, 1, 1),
+            (self._dyn_start, 2, 0), (self._dyn_ev23, 2, 1),
+            (self._dyn_t11,   3, 0), (self._dyn_state, 3, 1),
+        ]
+        for card, r, c in cards:
+            dsg.addWidget(card, r, c)
         h.addWidget(dsb, stretch=1)
 
         # G-force + IMU
@@ -3545,7 +3891,7 @@ class MainWindow(QMainWindow):
         
         self._log = QTextEdit()
         self._log.setReadOnly(True)
-        self._log.setMinimumHeight(150)
+        self._log.setMinimumHeight(75)
         self._log.document().setMaximumBlockCount(200)
         self._log.setStyleSheet(
             f"background:{F1_DARK_BG}; color:{F1_TEXT}; "
@@ -4813,6 +5159,14 @@ class MainWindow(QMainWindow):
             elif isinstance(w, ModuleBarWidget):
                 w.update()
                 
+            elif isinstance(w, QScrollArea):
+                w.setStyleSheet(f"QScrollArea {{ background:{F1_DARK_BG}; border:none; }} QScrollArea > QWidget > QWidget {{ background:{F1_DARK_BG}; }}")
+                if w.viewport():
+                    w.viewport().setStyleSheet(f"background:{F1_DARK_BG}; border:none;")
+                if w.widget():
+                    w.widget().setAttribute(Qt.WA_StyledBackground, True)
+                    w.widget().setStyleSheet(f"background:{F1_DARK_BG};")
+
             # Restyle buttons
             elif isinstance(w, QPushButton):
                 if w == self._btn_start:

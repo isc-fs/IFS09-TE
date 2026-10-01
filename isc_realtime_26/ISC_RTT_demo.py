@@ -22,6 +22,7 @@ v3 changes over v2:
 
 from __future__ import annotations
 import csv
+import logging
 import math
 import random
 import threading
@@ -30,7 +31,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
+import pandas as pd
+
 import ISC_RTT_serial as rtt
+
+logger = logging.getLogger("ISC_DEMO")
 
 try:
     import isc_marple
@@ -332,17 +338,6 @@ class DemoCSVLogger:
         self.writer.writerow(row)
         self.count += 1
 
-    def write_note(self, text: str) -> None:
-        """Write a custom comment/note row into the CSV file."""
-        try:
-            ts = datetime.now().isoformat()
-            elapsed = time.time() - self.start_time
-            row = [ts, f"{elapsed:.3f}"] + [""] * (len(self.HEADERS) - 3) + [text]
-            self.writer.writerow(row)
-            self.file.flush()
-        except Exception as e:
-            print(f"[DEMO] Error writing note to CSV: {e}")
-
         # Log to AMS SD file
         tick = snap.get("tick_ms", 0)
         fsm = snap.get("ams_fsm_state", 0)
@@ -390,6 +385,17 @@ class DemoCSVLogger:
             self.file.flush()
             self.ams_file.flush()
 
+    def write_note(self, text: str) -> None:
+        """Write a custom comment/note row into the CSV file."""
+        try:
+            ts = datetime.now().isoformat()
+            elapsed = time.time() - self.start_time
+            row = [ts, f"{elapsed:.3f}"] + [0] * (len(self.HEADERS) - 3) + [text]
+            self.writer.writerow(row)
+            self.file.flush()
+        except Exception as e:
+            print(f"[DEMO] Error writing note to CSV: {e}")
+
     def close(self) -> Optional[str]:
         if self.file:
             self.file.close()
@@ -413,6 +419,8 @@ class DemoDataGenerator:
         self._lock      = threading.Lock()
         self.logger: Optional[DemoCSVLogger] = None
         self.use_marple = False
+        self._real_df: Optional[pd.DataFrame] = None
+        self._real_log_name: str = ""
 
         # ── Kinematic state ────────────────────────────────────────────────
         self.t      = 0.0     # simulation time (s)
@@ -476,22 +484,73 @@ class DemoDataGenerator:
         self.imu_roll_deg = 0.0
         self.imu_pitch_deg = 0.0
 
+    # ── Real Log Discovery & Ingestion ─────────────────────────────────────
+    def _find_best_log(self, piloto: str = "", circuito: str = "") -> Optional[pd.DataFrame]:
+        """Find and load the best candidate historical CSV log to drive realistic demo replay."""
+        try:
+            search_dirs = [LOG_DIR, Path.home() / "Documents" / "ISCmetrics" / "logs", Path(__file__).resolve().parent / "logs"]
+            candidates = []
+            seen = set()
+            for sdir in search_dirs:
+                if not sdir.exists():
+                    continue
+                for f in sdir.glob("*.csv"):
+                    if f.name in seen or f.name.startswith("ISC_DEMO_") or f.name.endswith("_AMS_SD.csv"):
+                        continue
+                    seen.add(f.name)
+                    try:
+                        sz = f.stat().st_size
+                        if sz > 25000:
+                            candidates.append((f, sz, f.stat().st_mtime))
+                    except Exception:
+                        pass
+            if not candidates:
+                return None
+
+            p_lower = str(piloto).lower().strip() if piloto is not None and not isinstance(piloto, bool) else ""
+            c_lower = str(circuito).lower().strip() if circuito is not None and not isinstance(circuito, bool) else ""
+            matched = []
+            if p_lower and p_lower not in ("demo", "piloto_test", "test", "false", "true"):
+                matched = [c for c in candidates if p_lower in c[0].name.lower()]
+            if not matched and c_lower and c_lower not in ("track", "circuito_test", "test", "false", "true"):
+                matched = [c for c in candidates if c_lower in c[0].name.lower()]
+
+            chosen = matched[0] if matched else sorted(candidates, key=lambda x: x[2], reverse=True)[0]
+            chosen_path = chosen[0]
+
+            logger.info(f"[DEMO] Loading real telemetry log for realistic replay: {chosen_path.name}")
+            df = pd.read_csv(chosen_path)
+            if len(df) > 10:
+                self._real_log_name = chosen_path.name
+                return df
+        except Exception as e:
+            logger.warning(f"[DEMO] Failed loading candidate log: {e}")
+        return None
+
     # ── Public API ─────────────────────────────────────────────────────────
     def start(self, use_marple: bool = False,
               piloto: str = "Demo", circuito: str = "Track") -> None:
         if self.running:
             return
         self._reset()
+        self._real_df = self._find_best_log(piloto, circuito)
         self.use_marple = use_marple
         self.logger     = DemoCSVLogger(piloto, circuito)
         self.running    = True
         self.thread     = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
-        print(
-            f"[DEMO] Physics engine started  "
-            f"SoC=100 %  V_pack={_pack_ocv(1.0):.1f} V  "
-            f"Capacity={PACK_CAP_AH:.0f} Ah  Track={TRACK_LEN:.0f} m/lap"
-        )
+        if self._real_df is not None:
+            print(
+                f"[DEMO] Real log replay engine started using '{self._real_log_name}' "
+                f"({len(self._real_df)} samples)  "
+                f"Track={TRACK_LEN:.0f} m/lap"
+            )
+        else:
+            print(
+                f"[DEMO] Physics engine started  "
+                f"SoC=100 %  V_pack={_pack_ocv(1.0):.1f} V  "
+                f"Capacity={PACK_CAP_AH:.0f} Ah  Track={TRACK_LEN:.0f} m/lap"
+            )
 
     def stop(self) -> None:
         self.running = False
@@ -503,7 +562,12 @@ class DemoDataGenerator:
             ams_fp = self.logger.ams_filename
             if ams_fp.exists():
                 print("[DEMO] Automatically merging simulated AMS cell temperatures...")
-                rtt.merge_ams_temps_into_session(Path(fp), ams_fp)
+                try:
+                    res = rtt.merge_ams_temps_into_session(Path(fp), ams_fp)
+                    msg = res[1] if isinstance(res, tuple) and len(res) >= 2 else str(res)
+                    print(f"[DEMO] {msg}")
+                except Exception as e:
+                    print(f"[DEMO] AMS merge error: {e}")
                 try:
                     ams_fp.unlink()
                     print("[DEMO] Companion AMS SD CSV deleted.")
@@ -551,9 +615,192 @@ class DemoDataGenerator:
         self.imu_gz_dps = 0.0
         self.imu_roll_deg = 0.0
         self.imu_pitch_deg = 0.0
+        self._real_df = None
+        self._real_log_name = ""
 
-    # ── Main physics loop ───────────────────────────────────────────────────
+    # ── Main loop dispatcher ────────────────────────────────────────────────
     def _loop(self) -> None:
+        if self._real_df is not None and len(self._real_df) > 0:
+            self._replay_loop()
+        else:
+            self._synthetic_loop()
+
+    # ── Real Log Replay Loop ────────────────────────────────────────────────
+    def _replay_loop(self) -> None:
+        self.ctrl_state = 1; self.ams_state = 1
+        time.sleep(0.4)
+        self.ctrl_state = 2; self.ams_state = 3; self.inv_state = 2
+        time.sleep(0.3)
+        self.ctrl_state = 3; self.inv_state = 3
+
+        last_csv_t = time.time()
+        row_idx = 0
+        n_rows = len(self._real_df)
+
+        while self.running:
+            t0 = time.time()
+            row = self._real_df.iloc[row_idx]
+
+            # Speed and distance
+            speed_kmh = float(pd.to_numeric(row.get('inv_speed_actual', 0.0), errors='coerce') or 0.0)
+            self.v = speed_kmh / 3.6
+            self.dist += max(0.0, self.v * self.DT)
+
+            # Motor RPM
+            motor_rpm = float(pd.to_numeric(row.get('inv_rpm', 0.0), errors='coerce') or 0.0)
+
+            # Pedals & inputs
+            apps1 = int(pd.to_numeric(row.get('apps1_raw', 2500), errors='coerce') or 2500)
+            apps2 = int(pd.to_numeric(row.get('apps2_raw', 2330), errors='coerce') or 2330)
+            brake_adc = int(pd.to_numeric(row.get('brake_raw', 570), errors='coerce') or 570)
+            torque_pct = int(pd.to_numeric(row.get('torque_pct', 0), errors='coerce') or 0)
+            self.thr = float(torque_pct)
+
+            # Electrical
+            dc_bus_v = float(pd.to_numeric(row.get('inv_dc_bus_V', 380.0), errors='coerce') or 380.0)
+            corriente_a = float(pd.to_numeric(row.get('corriente_accu', 0.0), errors='coerce') or 0.0)
+            corriente_d = float(pd.to_numeric(row.get('corriente_dcdc', 38.0), errors='coerce') or 38.0)
+            soc_pct = float(pd.to_numeric(row.get('soc', 95.0), errors='coerce') or 95.0)
+            motor_I = float(pd.to_numeric(row.get('inv_current_actual', 0.0), errors='coerce') or 0.0)
+
+            # Battery modules
+            self.vmin_mod = [
+                float(pd.to_numeric(row.get(f'vmin_mod{i}', 3800), errors='coerce') or 3800)
+                for i in range(NUM_MODULES)
+            ]
+            self.vmax_mod = [
+                float(pd.to_numeric(row.get(f'vmax_mod{i}', 3850), errors='coerce') or 3850)
+                for i in range(NUM_MODULES)
+            ]
+            self.T_bat = [
+                float(pd.to_numeric(row.get(f'tmax_mod{i}', 30), errors='coerce') or 30)
+                for i in range(NUM_MODULES)
+            ]
+
+            # Temperatures
+            t_m2 = pd.to_numeric(row.get('inv_temp_motor2', row.get('inv_temp_motor1', 45)), errors='coerce')
+            self.T_motor = float(t_m2 if pd.notna(t_m2) else 45.0)
+            self.T_pwrstg = float(pd.to_numeric(row.get('inv_temp_pwrstg', 35), errors='coerce') or 35.0)
+            self.T_board = float(pd.to_numeric(row.get('inv_temp_board', 30), errors='coerce') or 30.0)
+            self.T_dcdc = float(pd.to_numeric(row.get('temp_dcdc', 32), errors='coerce') or 32.0)
+
+            # Inverter and states
+            self.inv_state = int(pd.to_numeric(row.get('inv_state', 6), errors='coerce') or 6)
+            self.ctrl_state = int(pd.to_numeric(row.get('ctrl_state', 3), errors='coerce') or 3)
+            self.ams_state = int(pd.to_numeric(row.get('ams_fsm_state', 3), errors='coerce') or 3)
+            dem_code = int(pd.to_numeric(row.get('dem_code', 0), errors='coerce') or 0)
+            foc_state = int(pd.to_numeric(row.get('emctrl_foc_bitstate', 0), errors='coerce') or 0)
+
+            # GPS
+            raw_lat = pd.to_numeric(row.get('gps_lat_deg', np.nan), errors='coerce')
+            raw_lon = pd.to_numeric(row.get('gps_lon_deg', np.nan), errors='coerce')
+            if pd.notna(raw_lat) and abs(raw_lat) > 1.0:
+                self.gps_lat = float(raw_lat)
+                self.gps_lon = float(raw_lon)
+                self.gps_cog = float(pd.to_numeric(row.get('gps_course_deg', 0.0), errors='coerce') or 0.0)
+                sog_knots = float(pd.to_numeric(row.get('gps_speed_kmh', 0.0), errors='coerce') or 0.0) * 0.539957
+                sats = int(pd.to_numeric(row.get('gps_sats', 10), errors='coerce') or 10)
+                fix = int(pd.to_numeric(row.get('gps_has_fix', 1), errors='coerce') or 1)
+            else:
+                lat, lon, cog = _gps_from_dist(self.dist)
+                self.gps_lat, self.gps_lon, self.gps_cog = lat, lon, cog
+                sog_knots = self.v * 1.9438
+                sats, fix = 10, 1
+
+            gps_dict = {
+                "lat": self.gps_lat, "lon": self.gps_lon, "sog": sog_knots,
+                "cog": self.gps_cog, "sats": sats, "fix": fix,
+            }
+
+            # IMU
+            raw_ax = pd.to_numeric(row.get('imu_ax_g', np.nan), errors='coerce')
+            if pd.notna(raw_ax):
+                self.imu_ax_g = float(raw_ax)
+                self.imu_ay_g = float(pd.to_numeric(row.get('imu_ay_g', 0.0), errors='coerce') or 0.0)
+                self.imu_az_g = float(pd.to_numeric(row.get('imu_az_g', 1.0), errors='coerce') or 1.0)
+                self.imu_gx_dps = float(pd.to_numeric(row.get('imu_gx_dps', 0.0), errors='coerce') or 0.0)
+                self.imu_gy_dps = float(pd.to_numeric(row.get('imu_gy_dps', 0.0), errors='coerce') or 0.0)
+                self.imu_gz_dps = float(pd.to_numeric(row.get('imu_gz_dps', 0.0), errors='coerce') or 0.0)
+                self.imu_roll_deg = float(pd.to_numeric(row.get('imu_roll_deg', 0.0), errors='coerce') or 0.0)
+                self.imu_pitch_deg = float(pd.to_numeric(row.get('imu_pitch_deg', 0.0), errors='coerce') or 0.0)
+            else:
+                self.imu_ax_g = max(-2.5, min(2.5, self.v * 0.08))
+                self.imu_ay_g = 0.0
+                self.imu_az_g = 1.0
+                self.imu_gx_dps = 0.0
+                self.imu_gy_dps = 0.0
+                self.imu_gz_dps = 0.0
+                self.imu_roll_deg = 0.0
+                self.imu_pitch_deg = 0.0
+
+            # Build snapshot dictionary
+            v_cell_min_mV = int(pd.to_numeric(row.get('v_cell_min_mV', min(self.vmin_mod)), errors='coerce') or min(self.vmin_mod))
+            snap = {
+                "tick_ms":            int(self.t * 1000) & 0xFFFFFFFF,
+                "seq":                self.seq,
+                "start_button":       1,
+                "apps1_raw":          apps1,
+                "apps2_raw":          apps2,
+                "brake_raw":          brake_adc,
+                "torque_pct":         torque_pct,
+                "ev_2_3":             1,
+                "t11_8_9":            1,
+                "state":              self.ctrl_state,
+                "ok_precharge":       1,
+                "ams_fsm_state":      self.ams_state,
+                "v_cell_min_mV":      v_cell_min_mV,
+                "soc":                soc_pct,
+                "vmin_modulo":        [int(v) for v in self.vmin_mod],
+                "vmax_modulo":        [int(v) for v in self.vmax_mod],
+                "corriente_accu":     corriente_a,
+                "corriente_dcdc":     corriente_d,
+                "temp_dcdc":          int(self.T_dcdc),
+                "temp_max_modulo":    [int(t) for t in self.T_bat],
+                "inv_state":          self.inv_state,
+                "last_vconfig_tick":  1,
+                "inv_error":          dem_code,
+                "dem_code":           dem_code,
+                "inv_dc_bus_V":       dc_bus_v,
+                "inv_temp_motor1":    int(self.T_motor),
+                "inv_temp_motor2":    int(self.T_motor),
+                "inv_temp_pwrstg":    int(self.T_pwrstg),
+                "inv_temp_board":     int(self.T_board),
+                "inv_rpm":            int(motor_rpm),
+                "inv_speed_actual":   int(speed_kmh),
+                "inv_current_actual": int(motor_I),
+                "inv_torque_est_nm":   int((torque_pct / 100.0) * MOTOR_MAX_TORQUE),
+                "inv_torque_max_feas": round(MOTOR_MAX_TORQUE * min(1.0, max(0.0, (dc_bus_v - PACK_V_DEPLETED) / max(1.0, PACK_V_FULL - PACK_V_DEPLETED))), 1),
+                "inv_subfault_bits":   0,
+                "pwrstg_bitstate":     0,
+                "emctrl_foc":          foc_state,
+                "emctrl_foc_bitstate": foc_state,
+                "dem_active":          dem_code,
+                "imu_ax_g":           self.imu_ax_g,
+                "imu_ay_g":           self.imu_ay_g,
+                "imu_az_g":           self.imu_az_g,
+                "imu_gx_dps":         self.imu_gx_dps,
+                "imu_gy_dps":         self.imu_gy_dps,
+                "imu_gz_dps":         self.imu_gz_dps,
+                "imu_roll_deg":       self.imu_roll_deg,
+                "imu_pitch_deg":      self.imu_pitch_deg,
+            }
+
+            self._publish(snap, gps_dict)
+
+            # CSV logging at ~10 Hz
+            if time.time() - last_csv_t >= 0.10:
+                with self._lock:
+                    if self.logger:
+                        self.logger.log(snap, self.t, gps_dict)
+                last_csv_t = time.time()
+
+            self.t += self.DT
+            self.seq = (self.seq + 1) & 0xFFFF
+            row_idx = (row_idx + 1) % n_rows
+            time.sleep(max(0.0, self.DT - (time.time() - t0)))
+
+    # ── Synthetic physics loop (fallback) ───────────────────────────────────
+    def _synthetic_loop(self) -> None:
         # ── Startup sequence (EV precharge state machine) ──────────────────
         self.ctrl_state = 1; self.ams_state = 1
         time.sleep(0.5)
@@ -952,13 +1199,13 @@ class DemoDataGenerator:
         # Trigger log line in ISCmetrics
         rtt.new_data_flag = 1
         rtt.data_str = (
-            f"[DEMO] SEQ={snap['seq']:5d}  "
-            f"V={snap['inv_dc_bus_V']:3d} V  "
-            f"SoC={snap['soc']:3d}%  "
-            f"rpm={snap['inv_rpm']:5d}  "
-            f"T_bat_max={max(snap['temp_max_modulo']):.0f}°C  "
-            f"I={snap['corriente_accu']/10.0:.1f} A  "
-            f"GPS={gps['lat']:.5f},{gps['lon']:.5f}"
+            f"[DEMO] SEQ={int(snap.get('seq', 0)):5d}  "
+            f"V={float(snap.get('inv_dc_bus_V', 0)):.1f} V  "
+            f"SoC={float(snap.get('soc', 0)):.0f}%  "
+            f"rpm={int(snap.get('inv_rpm', 0)):5d}  "
+            f"T_bat_max={float(max(snap.get('temp_max_modulo', [0]))):.0f}°C  "
+            f"I={float(snap.get('corriente_accu', 0))/10.0:.1f} A  "
+            f"GPS={float(gps.get('lat', 0)):.5f},{float(gps.get('lon', 0)):.5f}"
         )
 
     # ── Compatibility: expose brake temps & G-force for legacy access ────────

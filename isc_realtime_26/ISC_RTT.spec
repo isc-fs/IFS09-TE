@@ -6,7 +6,7 @@ excludes = [
     'PyQt5.QtQml', 'PyQt5.QtQuick', 'PyQt5.Qt3D', 'PyQt5.QtMultimedia',
     'PyQt5.QtSql', 'PyQt5.QtDesigner', 'PyQt5.QtBluetooth', 'PyQt5.QtSensors',
     'PyQt5.QtPositioning', 'PyQt5.QtXml', 'PyQt5.QtNfc',
-    'tkinter', 'tcl', 'scipy', 'curses',
+    'tkinter', 'tcl', 'curses',
     'matplotlib.tests', 'matplotlib.testing', 'numpy.tests'
 ]
 
@@ -15,7 +15,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('isc_logo.png', '.'), ('isc_logo.ico', '.')],
-    hiddenimports=[],
+    hiddenimports=['pydoc', 'unittest', 'core', 'core.sync', 'core.marple_exporter', 'ui.modals'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

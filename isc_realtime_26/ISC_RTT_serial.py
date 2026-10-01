@@ -1156,6 +1156,21 @@ def merge_ams_temps_into_session(
         if 'tick_ms' not in ams_df.columns:
             return False, "AMS SD-card log missing 'tick_ms' column."
 
+        # Ensure tick_ms columns are clean numeric int64
+        session_df['tick_ms'] = pd.to_numeric(session_df['tick_ms'], errors='coerce')
+        ams_df['tick_ms'] = pd.to_numeric(ams_df['tick_ms'], errors='coerce')
+
+        session_df = session_df.dropna(subset=['tick_ms']).copy()
+        ams_df = ams_df.dropna(subset=['tick_ms']).copy()
+
+        if len(session_df) == 0:
+            return False, "Session CSV has no valid numeric tick_ms data."
+        if len(ams_df) == 0:
+            return False, "AMS SD-card log has no valid numeric tick_ms data."
+
+        session_df['tick_ms'] = session_df['tick_ms'].astype(np.int64)
+        ams_df['tick_ms'] = ams_df['tick_ms'].astype(np.int64)
+
         s_ticks = session_df['tick_ms'].values
         a_ticks = ams_df['tick_ms'].values
 
@@ -1164,14 +1179,14 @@ def merge_ams_temps_into_session(
 
         # Check for accumulator current or min cell voltage to use as alignment signal
         if 'corriente_accu' in session_df.columns and 'I_filt_mA' in ams_df.columns:
-            s_val = session_df['corriente_accu'].values * 1000.0  # A to mA
-            a_val = ams_df['I_filt_mA'].values
+            s_val = pd.to_numeric(session_df['corriente_accu'], errors='coerce').fillna(0).values * 1000.0  # A to mA
+            a_val = pd.to_numeric(ams_df['I_filt_mA'], errors='coerce').fillna(0).values
         elif 'v_cell_min_mV' in session_df.columns and 'vmin_mV' in ams_df.columns:
-            s_val = session_df['v_cell_min_mV'].values
-            a_val = ams_df['vmin_mV'].values
+            s_val = pd.to_numeric(session_df['v_cell_min_mV'], errors='coerce').fillna(0).values
+            a_val = pd.to_numeric(ams_df['vmin_mV'], errors='coerce').fillna(0).values
 
         best_offset = 0
-        if s_val is not None and a_val is not None and len(s_val) > 0 and len(a_val) > 0:
+        if s_val is not None and a_val is not None and len(s_val) > 0 and len(a_val) > 0 and (np.ptp(s_val) > 0 or np.ptp(a_val) > 0):
             min_mae = float('inf')
             offsets = np.arange(-60000, 60000, 100)
             for offset in offsets:
@@ -1180,13 +1195,13 @@ def merge_ams_temps_into_session(
                 mae = np.mean(np.abs(s_val - interp_val))
                 if mae < min_mae:
                     min_mae = mae
-                    best_offset = offset
+                    best_offset = int(offset)
             logger.info(f"[POST-RACE] Found best tick_ms offset: {best_offset} ms (MAE={min_mae:.2f})")
         else:
-            logger.info("[POST-RACE] Common signal not found or empty. Assuming offset = 0.")
+            logger.info("[POST-RACE] Common signal not found or empty/flat. Assuming offset = 0.")
 
         # Shift ams_df tick_ms by best_offset to align with session_df
-        ams_df['_aligned_tick'] = ams_df['tick_ms'] - best_offset
+        ams_df['_aligned_tick'] = (ams_df['tick_ms'] - best_offset).astype(np.int64)
 
         # Drop any previously injected AMS temperature columns to avoid duplicates
         for col in AMS_TEMP_COLS:
@@ -1207,9 +1222,13 @@ def merge_ams_temps_into_session(
         ams_subset = ams_df[cols_to_merge].rename(columns=rename_map)
         ams_subset.sort_values('_aligned_tick', inplace=True)
 
-        # Sort session_df by tick_ms for merge_asof
-        orig_order = session_df.index.copy()
+        # Preserve original order using explicit column
+        session_df['_orig_idx'] = np.arange(len(session_df))
         session_df.sort_values('tick_ms', inplace=True)
+
+        # Ensure both keys are strictly int64
+        session_df['tick_ms'] = session_df['tick_ms'].astype(np.int64)
+        ams_subset['_aligned_tick'] = ams_subset['_aligned_tick'].astype(np.int64)
 
         # Nearest-neighbour join based on tick_ms (tolerance of 5 seconds = 5000 ms)
         merged = pd.merge_asof(
@@ -1221,9 +1240,9 @@ def merge_ams_temps_into_session(
             tolerance=5000,
         )
 
-        merged.drop(columns=['_aligned_tick'], inplace=True, errors='ignore')
         # Restore original order
-        merged = merged.loc[orig_order.values]
+        merged.sort_values('_orig_idx', inplace=True)
+        merged.drop(columns=['_orig_idx', '_aligned_tick'], inplace=True, errors='ignore')
         
         new_path = session_path if session_path.stem.endswith('_merged') else session_path.with_name(f"{session_path.stem}_merged{session_path.suffix}")
         merged.to_csv(new_path, index=False)
