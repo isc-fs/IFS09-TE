@@ -77,7 +77,7 @@ FRAG_SLOW        = 5
 FRAG_SNAPSHOT    = 5
 HDR_SIZE      = 8      # bytes 0-7 are the fragment header
 DATA_SIZE     = 24     # bytes 8-31 are the data slice
-SNAPSHOT_SIZE = 102    # backward compatibility for CSV headers/IMU
+SNAPSHOT_SIZE = 107    # 107-byte v3 snapshot with inverter diagnostics and AC power
 
 
 # ================== SERIAL FRAMING CONSTANTS ==================
@@ -236,8 +236,11 @@ class SerialCSVLogger:
         # ── GPS  [snap bytes 82-95] ──────────────────────────────────────────
         "gps_lat_deg", "gps_lon_deg", "gps_speed_kmh", "gps_course_deg",
         "gps_sats", "gps_has_fix",
-        # ── Inverter FOC & Torque Metrics [snap bytes 96-101] ────────────────
-        "inv_torque_est_nm", "inv_torque_max_feas", "inv_subfault_bits",
+        # ── Inverter Diagnostics, Torque & Power [snap bytes 96-106] ────────────────
+        "inv_pwrstg_bits", "inv_emctrl_bits",
+        "inv_torque_est_nm", "inv_torque_max_feas",
+        "inv_ac_power_W", "inv_ac_power_kW", "dc_bus_power_kW", "inv_efficiency_pct",
+        "inv_subfault_bits",
         # ── IMU (simulated or parsed from snap bytes) ─────────────────────────
         "imu_ax_g", "imu_ay_g", "imu_az_g",
         "imu_gx_dps", "imu_gy_dps", "imu_gz_dps",
@@ -305,9 +308,15 @@ class SerialCSVLogger:
             s.get('gps_speed_kmh', "") if s.get('gps_has_fix', 0) else "",
             s.get('gps_course_deg',"") if s.get('gps_has_fix', 0) else "",
             s.get('gps_sats',        0), s.get('gps_has_fix', 0),
-            # Inverter FOC & Torque Metrics [bytes 96-101]
+            # Inverter Diagnostics, Torque & Power [snap bytes 96-106]
+            s.get('inv_pwrstg_bits',     0),
+            s.get('inv_emctrl_bits',     0),
             s.get('inv_torque_est_nm',   0),
             s.get('inv_torque_max_feas', 0.0),
+            s.get('inv_ac_power_W',      0),
+            s.get('inv_ac_power_kW',     0.0),
+            s.get('dc_bus_power_kW',     0.0),
+            s.get('inv_efficiency_pct',  0.0),
             s.get('inv_subfault_bits',   0),
             # IMU columns
             s.get('imu_ax_g',            0.0), s.get('imu_ay_g',         0.0), s.get('imu_az_g',            0.0),
@@ -617,13 +626,13 @@ def _decode_slow_snapshot(data: bytes, seq: int) -> dict:
     }
 
 
-_SNAP_FMT_FLAT = struct.Struct("<I H B H H H H B B B B B H B 5H 5H h h h 5h B B B H H H H i i i i i H H B B h h H")
+_SNAP_FMT_FLAT = struct.Struct("<I H B H H H H B B B B B H B 5H 5H h h h 5h B B B H H H H i i i i i H H B B H B h h i")
 
 def _decode_flat_snapshot(data: bytes, seq: int) -> dict:
-    if len(data) < 102:
-        logger.warning(f"_decode_flat_snapshot: short buffer ({len(data)} < 102)")
+    if len(data) < SNAPSHOT_SIZE:
+        logger.warning(f"_decode_flat_snapshot: short buffer ({len(data)} < {SNAPSHOT_SIZE})")
         return {}
-    unpacked = _SNAP_FMT_FLAT.unpack(data[:102])
+    unpacked = _SNAP_FMT_FLAT.unpack(data[:SNAPSHOT_SIZE])
     
     # Extract list values
     vmin_modulo = list(unpacked[14:19])
@@ -641,17 +650,28 @@ def _decode_flat_snapshot(data: bytes, seq: int) -> dict:
     _gps_sats       = unpacked[46]
     _gps_has_fix    = unpacked[47]
 
-    # ── Inverter FOC feedback & fault diagnostics [bytes 96..101] ─────────────
-    inv_tq_est_nm   = unpacked[48]   # int16 LE 1 Nm/LSB
-    inv_tq_feas_raw = unpacked[49]   # int16 LE 0.1 Nm/LSB
-    inv_subfault    = unpacked[50]   # uint16 LE: PwrStg(9) | EMCtrl_FOC(6)<<9 | DEM_Active(1)<<15
+    # ── Inverter Diagnostics, Torque & AC Power [bytes 96..106] ───────────────
+    inv_pwrstg_bits     = int(unpacked[48])   # uint16 LE (9 bits L1 PwrStg)
+    inv_emctrl_bits     = int(unpacked[49])   # uint8 (8 bits L2 EMCtrl FOC)
+    inv_torque_est_nm   = int(unpacked[50])   # int16 LE (Nm)
+    inv_torque_max_feas = int(unpacked[51])   # int16 LE (Ceiling)
+    inv_ac_power_W      = int(unpacked[52])   # int32 LE (Watts)
 
-    inv_torque_est_nm   = int(inv_tq_est_nm)
-    inv_torque_max_feas = round(inv_tq_feas_raw * 0.1, 1)
-    inv_subfault_bits   = int(inv_subfault)
-    pwrstg_bitstate     = inv_subfault_bits & 0x01FF
-    emctrl_foc          = (inv_subfault_bits >> 9) & 0x003F
-    dem_active          = 1 if (inv_subfault_bits & 0x8000) else 0
+    inv_ac_power_kW     = round(inv_ac_power_W / 1000.0, 2)
+    inv_dc_bus_V        = unpacked[35]
+    corriente_accu      = unpacked[24] / 10.0
+    dc_bus_power_W      = abs(inv_dc_bus_V * corriente_accu)
+    dc_bus_power_kW     = round(dc_bus_power_W / 1000.0, 2)
+
+    if dc_bus_power_W > 500.0 and inv_ac_power_W > 0:
+        inv_efficiency_pct = round(min(100.0, max(0.0, (inv_ac_power_W / dc_bus_power_W) * 100.0)), 1)
+    else:
+        inv_efficiency_pct = 0.0
+
+    pwrstg_bitstate     = inv_pwrstg_bits & 0x01FF
+    emctrl_foc          = inv_emctrl_bits & 0x00FF
+    dem_active          = 1 if unpacked[34] != 0 else 0
+    inv_subfault_bits   = inv_pwrstg_bits | (inv_emctrl_bits << 9)
 
     return {
         'tick_ms':            unpacked[0],
@@ -671,7 +691,7 @@ def _decode_flat_snapshot(data: bytes, seq: int) -> dict:
         'soc':                unpacked[13],
         'vmin_modulo':        vmin_modulo,
         'vmax_modulo':        vmax_modulo,
-        'corriente_accu':     unpacked[24] / 10.0,
+        'corriente_accu':     corriente_accu,
         'corriente_dcdc':     -unpacked[25] / 10.0,
         'temp_dcdc':          unpacked[26],
         'temp_max_modulo':    temp_max_modulo,
@@ -681,7 +701,7 @@ def _decode_flat_snapshot(data: bytes, seq: int) -> dict:
         'inv_error':          unpacked[34],
         'dem_code':           unpacked[34],  # Alias for inv_error (DEM_Code from EMC_TX_STATE_2)
         'emctrl_foc_bitstate': emctrl_foc,
-        'inv_dc_bus_V':       unpacked[35],
+        'inv_dc_bus_V':       inv_dc_bus_V,
         # DBC EMC_TX_STATE_5 (0x464): physical_degC = raw_byte - 50  (scale=1, offset=-50)
         'inv_temp_motor1':    unpacked[36] - 50,  # EMachine_Temp_1_degC (Sensor 1, disconnected → 205°C)
         'inv_temp_motor2':    unpacked[37] - 50,  # EMachine_Temp_2_degC (Sensor 2, Motor Winding NTC)
@@ -705,9 +725,15 @@ def _decode_flat_snapshot(data: bytes, seq: int) -> dict:
         'gps_speed_kmh_x100': _gps_spd_raw,
         'gps_course_deg_x100':_gps_crs_raw,
 
-        # ── Inverter FOC & Torque Metrics [bytes 96..101] ────────────────────
+        # ── Inverter Diagnostics, Torque & Power [bytes 96..106] ────────────
+        'inv_pwrstg_bits':    inv_pwrstg_bits,
+        'inv_emctrl_bits':    inv_emctrl_bits,
         'inv_torque_est_nm':   inv_torque_est_nm,
         'inv_torque_max_feas': inv_torque_max_feas,
+        'inv_ac_power_W':      inv_ac_power_W,
+        'inv_ac_power_kW':     inv_ac_power_kW,
+        'dc_bus_power_kW':     dc_bus_power_kW,
+        'inv_efficiency_pct':  inv_efficiency_pct,
         'inv_subfault_bits':   inv_subfault_bits,
         'pwrstg_bitstate':     pwrstg_bitstate,
         'emctrl_foc':          emctrl_foc,
@@ -1307,8 +1333,14 @@ def receive_data(bucket_id: str,
         'inv_rpm':            0,
         'inv_speed_actual':   0,
         'inv_current_actual': 0,
+        'inv_pwrstg_bits':    0,
+        'inv_emctrl_bits':    0,
         'inv_torque_est_nm':   0,
         'inv_torque_max_feas': 0.0,
+        'inv_ac_power_W':      0,
+        'inv_ac_power_kW':     0.0,
+        'dc_bus_power_kW':     0.0,
+        'inv_efficiency_pct':  0.0,
         'inv_subfault_bits':   0,
         'pwrstg_bitstate':     0,
         'emctrl_foc':          0,

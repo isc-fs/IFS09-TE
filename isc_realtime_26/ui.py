@@ -723,6 +723,199 @@ class MetricCard(QFrame):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  INVERTER CONSTANTS & DIAGNOSTIC FLAGS (CAN 0x461, 0x466, 0x467, 0x468)
+# ══════════════════════════════════════════════════════════════════════════════
+INVERTER_STATE_MAP = {
+    0: "0 (OFF)",
+    1: "1 (INIT)",
+    2: "2 (POST)",
+    3: "3 (AWAIT HV)",
+    4: "4 (HV READY)",
+    5: "5 (CURRENT CTRL)",
+    6: "6 (TORQUE ENABLE)",
+    7: "7 (SPEED CTRL)",
+    10: "10 (FAULT SOFT)",
+    11: "11 (FAULT HARD)",
+    12: "12 (DISCHARGE)",
+    13: "13 (SHUTDOWN)",
+    14: "14 (LV OFF)",
+}
+
+INVERTER_DEM_MAP = {
+    0: "No Fault (Normal)",
+    1: "Lost Setpoint Msg",
+    2: "DC Bus Undervoltage",
+    3: "Power Stage Overtemp",
+    4: "PwrStg Temp Degrade",
+    5: "EMCtrl Fault",
+    6: "Task Overrun",
+    7: "CAN BusOff",
+    8: "EMachine Overtemp",
+    9: "Phase Current OOR",
+    10: "PwrStg Temp OOR",
+    11: "DC Bus OOR",
+    12: "DP Overtemp",
+    13: "DRV Overtemp",
+    14: "Aux Supply UV",
+    15: "Aux Supply OV",
+    16: "Overspeed",
+    17: "Speed Degrade",
+    18: "EMachine Temp Degrade",
+    19: "Bad Current Offset",
+    20: "Encoder Error",
+    21: "Ext Temp 1 OOR",
+    22: "Ext Temp 2 OOR",
+    23: "PMIC Not Ready",
+    26: "Invalid Calibration",
+    29: "Crosscheck Fault",
+    32: "HW Supervisor Fault",
+    33: "KL30 UV",
+    34: "KL30 OV",
+    37: "LV Sensor Supply Fault",
+}
+
+L1_PWRSTG_FLAGS = [
+    ("L1.0", "U-Low Driver", "Low-side phase U gate driver fault / power supply drop", 0x0001),
+    ("L1.1", "U-High Driver", "High-side phase U gate driver fault / bootstrap failure", 0x0002),
+    ("L1.2", "V-Low Driver", "Low-side phase V gate driver fault / power supply drop", 0x0004),
+    ("L1.3", "V-High Driver", "High-side phase V gate driver fault / bootstrap failure", 0x0008),
+    ("L1.4", "W-Low Driver", "Low-side phase W gate driver fault / power supply drop", 0x0010),
+    ("L1.5", "W-High Driver", "High-side phase W gate driver fault / bootstrap failure", 0x0020),
+    ("L1.6", "Desat (OC)", "IGBT desaturation detected (severe phase short/overcurrent)", 0x0040),
+    ("L1.7", "PwrStg Overtemp", "Power stage module temperature exceeded hardware safety threshold", 0x0080),
+    ("L1.8", "Gate Aux UV", "Auxiliary isolated power supply undervoltage on gate board", 0x0100),
+]
+
+L2_EMCTRL_FLAGS = [
+    ("L2.0", "Current Sampling", "ADC current sensor offset calibration or sampling timing error", 0x01),
+    ("L2.1", "Phase Current Clamped", "FOC peak stator phase current exceeded maximum control limit", 0x02),
+    ("L2.2", "Rotor Pos Disagree", "Encoder / resolver electrical angle disagreement with observer", 0x04),
+    ("L2.3", "Field Weakening", "D-axis field weakening current reached negative saturation limit", 0x08),
+    ("L2.4", "Flux Observer", "Motor flux linkage observer state matrix saturated or unstable", 0x10),
+    ("L2.5", "Speed Unlock", "Speed tracking observer PLL lost lock relative to electrical frequency", 0x20),
+    ("L2.6", "DC Volt Transient", "Severe DC bus voltage rate-of-rise or transient spike detected", 0x40),
+    ("L2.7", "Modulation Clamped", "SVPWM inverter modulation index reached over-modulation ceiling", 0x80),
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DIAGNOSTIC FLAG BADGE (INVERTER L1/L2 SUB-FAULTS)
+# ══════════════════════════════════════════════════════════════════════════════
+class DiagFlagBadge(QFrame):
+    """Compact, high-contrast status badge for inverter L1/L2 diagnostic flags."""
+    def __init__(self, code: str, title: str, tooltip: str, parent=None):
+        super().__init__(parent)
+        self.code = code
+        self.title = title
+        self._is_active = False
+        self.setToolTip(f"<b>[{code}] {title}</b><br>{tooltip}")
+        self.setFixedHeight(28)
+        
+        self.setStyleSheet(
+            "QFrame { background:#141417; border:1px solid #27272a; border-radius:4px; }"
+        )
+        
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(6)
+        
+        self._code_lbl = QLabel(code)
+        self._code_lbl.setStyleSheet("color:#71717a; font-size:10px; font-weight:bold; font-family:'Consolas', monospace; background:transparent; border:none;")
+        self._code_lbl.setFixedWidth(30)
+        
+        self._title_lbl = QLabel(title)
+        self._title_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:10.5px; font-weight:600; background:transparent; border:none;")
+        
+        self._status_lbl = QLabel("OK")
+        self._status_lbl.setAlignment(Qt.AlignCenter)
+        self._status_lbl.setFixedWidth(36)
+        self._status_lbl.setStyleSheet("color:#10b981; background:#064e3b; font-size:9.5px; font-weight:bold; border-radius:3px; padding:1px; border:none;")
+        
+        lay.addWidget(self._code_lbl)
+        lay.addWidget(self._title_lbl, stretch=1)
+        lay.addWidget(self._status_lbl)
+
+    def set_active(self, active: bool) -> None:
+        if self._is_active == active:
+            return
+        self._is_active = active
+        if active:
+            self.setStyleSheet(
+                "QFrame { background:#2a0808; border:1.5px solid #ef4444; border-radius:4px; }"
+            )
+            self._code_lbl.setStyleSheet("color:#fca5a5; font-size:10px; font-weight:bold; font-family:'Consolas', monospace; background:transparent; border:none;")
+            self._title_lbl.setStyleSheet("color:#ffffff; font-size:10.5px; font-weight:bold; background:transparent; border:none;")
+            self._status_lbl.setText("TRIP")
+            self._status_lbl.setStyleSheet("color:#ffffff; background:#ef4444; font-size:9.5px; font-weight:bold; border-radius:3px; padding:1px; border:none;")
+        else:
+            self.setStyleSheet(
+                "QFrame { background:#141417; border:1px solid #27272a; border-radius:4px; }"
+            )
+            self._code_lbl.setStyleSheet("color:#71717a; font-size:10px; font-weight:bold; font-family:'Consolas', monospace; background:transparent; border:none;")
+            self._title_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:10.5px; font-weight:600; background:transparent; border:none;")
+            self._status_lbl.setText("OK")
+            self._status_lbl.setStyleSheet("color:#10b981; background:#064e3b; font-size:9.5px; font-weight:bold; border-radius:3px; padding:1px; border:none;")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  POWER ENVELOPE BAR (80 kW FORMULA STUDENT MONITOR)
+# ══════════════════════════════════════════════════════════════════════════════
+class PowerEnvelopeBar(QWidget):
+    """Horizontal gauge bar visualizing DC/AC power against the Formula Student 80 kW limit."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._dc_kw = 0.0
+        self._ac_kw = 0.0
+        self.setFixedHeight(28)
+        
+    def set_power(self, dc_kw: float, ac_kw: float) -> None:
+        if abs(self._dc_kw - dc_kw) < 0.1 and abs(self._ac_kw - ac_kw) < 0.1:
+            return
+        self._dc_kw = dc_kw
+        self._ac_kw = ac_kw
+        self.update()
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w = float(self.width())
+        h = float(self.height())
+        
+        # Background track
+        bg_rect = QRectF(0, 4, w, h - 8)
+        painter.setBrush(QColor("#18181b"))
+        painter.setPen(QPen(QColor("#27272a"), 1))
+        painter.drawRoundedRect(bg_rect, 4, 4)
+        
+        # 80 kW maximum limit
+        max_limit = 80.0
+        dc_val = max(0.0, self._dc_kw)
+        fill_ratio = min(1.0, dc_val / max_limit) if max_limit > 0 else 0.0
+        fill_w = max(0.0, (w - 2) * fill_ratio)
+        
+        # Bar color based on 80 kW proximity
+        if dc_val > 80.0:
+            bar_color = QColor("#ef4444")  # Rule breach red
+        elif dc_val > 78.0:
+            bar_color = QColor("#f97316")  # Critical margin orange
+        elif dc_val > 72.0:
+            bar_color = QColor("#f59e0b")  # Caution amber
+        else:
+            bar_color = QColor("#10b981")  # Nominal green
+            
+        if fill_w > 0:
+            fill_rect = QRectF(1, 5, fill_w, h - 10)
+            painter.setBrush(bar_color)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(fill_rect, 3, 3)
+            
+        # Draw 72 kW (90%) and 80 kW (100%) marker lines
+        p90_x = (w - 2) * 0.90
+        painter.setPen(QPen(QColor("#eab308"), 1.5, Qt.DashLine))
+        painter.drawLine(int(p90_x), 2, int(p90_x), int(h - 2))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  RPM GAUGE  (circular, QPainter)
 # ══════════════════════════════════════════════════════════════════════════════
 class RPMGauge(QWidget):
@@ -3308,7 +3501,7 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._tabs.setFont(QFont("Segoe UI", 10, QFont.Bold))
         self._tabs.addTab(_wrap_scroll(self._tab_overview()),     "Overview")
-        self._tabs.addTab(_wrap_scroll(self._tab_acu_overview()), "Full ACU Overview")
+        self._tabs.addTab(_wrap_scroll(self._tab_inverter_diag()), "Inverter & Power")
         self._tabs.addTab(_wrap_scroll(self._tab_customize()),    "Customize")
         self._tabs.addTab(_wrap_scroll(self._tab_powertrain()),   "Powertrain")
         self._tabs.addTab(_wrap_scroll(self._tab_dynamics()),     "Dynamics")
@@ -3534,157 +3727,188 @@ class MainWindow(QMainWindow):
         v.addLayout(ir, stretch=1)
         return w
 
-    # ── Tab 2 — Full ACU Overview (95-Cell Voltages & 190-Sensor Temperatures) ─
-    def _tab_acu_overview(self) -> QWidget:
+    # ── Tab 2 — Inverter Diagnostics & Powertrain (L1/L2 Sub-Faults, Torque & 80 kW Envelope) ─
+    def _tab_inverter_diag(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
         v.setSpacing(8)
         v.setContentsMargins(8, 8, 8, 8)
 
-        # ── 1. Top Section: Fault Card & Battery Pack Health Metrics ─────────
+        # ── 1. Top Section: Inverter State Machine & Core Powertrain Tiles ────────
         top_box = QHBoxLayout()
         top_box.setSpacing(8)
 
-        # Fault Card Frame
-        fault_box = QGroupBox("AMS FAULT LATCH & SAFETY STATUS (CAN 0x4A3)")
-        fault_box.setStyleSheet(
-            f"QGroupBox {{ color:{F1_ERROR}; border:1.5px solid {F1_ERROR}; "
+        # Inverter Core State & DEM Fault Box
+        st_box = QGroupBox("INVERTER SUPERVISOR & DEM FAULT STATUS (CAN 0x461)")
+        st_box.setStyleSheet(
+            f"QGroupBox {{ color:{ISC_GREEN}; border:1.5px solid #3f3f46; "
             f"margin-top:14px; font-size:11px; font-weight:bold; }} "
             f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
-            f"padding:0 6px; color:{F1_ERROR}; background:{F1_DARK_BG}; }}"
+            f"padding:0 6px; color:{ISC_GREEN}; background:{F1_DARK_BG}; }}"
         )
-        self._acu_fault_box = fault_box
-        fb_lay = QGridLayout(fault_box)
-        fb_lay.setSpacing(6)
-        fb_lay.setContentsMargins(10, 12, 10, 10)
+        self._inv_diag_st_box = st_box
+        sb_lay = QGridLayout(st_box)
+        sb_lay.setSpacing(6)
+        sb_lay.setContentsMargins(10, 10, 10, 10)
 
-        # FSM State
-        fb_lay.addWidget(self._lbl("FSM STATE:", f"color:{ISC_GREEN}; font-size:11px; font-weight:bold;"), 0, 0)
-        self._acu_fsm_lbl = QLabel("0 (STANDBY)")
-        self._acu_fsm_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:12px; font-weight:bold;")
-        fb_lay.addWidget(self._acu_fsm_lbl, 0, 1)
+        sb_lay.addWidget(self._lbl("INVERTER STATE:", f"color:{ISC_GREEN}; font-size:11px; font-weight:bold;"), 0, 0)
+        self._inv_state_lbl = QLabel("0 (OFF)")
+        self._inv_state_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:12px; font-weight:bold;")
+        sb_lay.addWidget(self._inv_state_lbl, 0, 1)
 
-        # Tripped Reason
-        fb_lay.addWidget(self._lbl("FAULT REASON:", f"color:{F1_ERROR}; font-size:11px; font-weight:bold;"), 0, 2)
-        self._acu_fault_reason_lbl = QLabel("No Fault")
-        self._acu_fault_reason_lbl.setStyleSheet(f"color:{ISC_GREEN}; font-size:12px; font-weight:bold;")
-        fb_lay.addWidget(self._acu_fault_reason_lbl, 0, 3)
+        sb_lay.addWidget(self._lbl("DEM CODE:", f"color:{F1_WARNING}; font-size:11px; font-weight:bold;"), 0, 2)
+        self._inv_dem_lbl = QLabel("0 (No Fault)")
+        self._inv_dem_lbl.setStyleSheet("color:#10b981; font-size:12px; font-weight:bold;")
+        sb_lay.addWidget(self._inv_dem_lbl, 0, 3)
 
-        # Offending Location (Module, Cell/NTC)
-        fb_lay.addWidget(self._lbl("OFFENDING LOC:", "color:#f59e0b; font-size:11px; font-weight:bold;"), 1, 0)
-        self._acu_offending_loc_lbl = QLabel("None")
-        self._acu_offending_loc_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:12px; font-family:'Consolas', monospace; font-weight:bold;")
-        fb_lay.addWidget(self._acu_offending_loc_lbl, 1, 1)
+        sb_lay.addWidget(self._lbl("TORQUE LIMITING:", "color:#38bdf8; font-size:11px; font-weight:bold;"), 1, 0)
+        self._inv_tq_limit_lbl = QLabel("NORMAL HEADROOM")
+        self._inv_tq_limit_lbl.setStyleSheet("color:#10b981; font-size:11.5px; font-weight:bold;")
+        sb_lay.addWidget(self._inv_tq_limit_lbl, 1, 1)
 
-        # Tripped Reading Value
-        fb_lay.addWidget(self._lbl("TRIPPED VALUE:", "color:#f59e0b; font-size:11px; font-weight:bold;"), 1, 2)
-        self._acu_tripped_val_lbl = QLabel("—")
-        self._acu_tripped_val_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:12px; font-family:'Consolas', monospace; font-weight:bold;")
-        fb_lay.addWidget(self._acu_tripped_val_lbl, 1, 3)
+        sb_lay.addWidget(self._lbl("VCONFIG RELAY:", "color:#a855f7; font-size:11px; font-weight:bold;"), 1, 2)
+        self._inv_vcfg_lbl = QLabel("ACTIVE (DC BUS OK)")
+        self._inv_vcfg_lbl.setStyleSheet("color:#10b981; font-size:11.5px; font-weight:bold;")
+        sb_lay.addWidget(self._inv_vcfg_lbl, 1, 3)
 
-        # Hardware Error Latch Status
-        fb_lay.addWidget(self._lbl("SHUTDOWN LATCH:", "color:#38bdf8; font-size:11px; font-weight:bold;"), 2, 0)
-        self._acu_latch_lbl = QLabel("CLEAR (NORMAL)")
-        self._acu_latch_lbl.setStyleSheet(f"color:{ISC_GREEN}; font-size:12px; font-weight:bold;")
-        fb_lay.addWidget(self._acu_latch_lbl, 2, 1)
+        top_box.addWidget(st_box, stretch=3)
 
-        # Sub-fault Bitmask Details
-        fb_lay.addWidget(self._lbl("DIAG BITMASKS:", "color:#a855f7; font-size:11px; font-weight:bold;"), 2, 2)
-        self._acu_subfault_lbl = QLabel("DISC: 0x00 | OPEN: 0x00 | TAP: 0x00")
-        self._acu_subfault_lbl.setStyleSheet(f"color:{F1_MUTED}; font-size:11px; font-family:'Consolas', monospace; font-weight:600;")
-        fb_lay.addWidget(self._acu_subfault_lbl, 2, 3)
+        # Core Metrics Cards
+        self._inv_dc_bus_card   = MetricCard("DC BUS", "V", color=ISC_GREEN)
+        self._inv_ac_pwr_card   = MetricCard("AC POWER", "kW", color=F1_BLUE)
+        self._inv_dc_pwr_card   = MetricCard("DC POWER", "kW", color=F1_PURPLE)
+        self._inv_eff_card      = MetricCard("EFFICIENCY (η)", "%", color=ISC_GREEN)
+        self._inv_tq_est_card   = MetricCard("EST. TORQUE", "Nm", color=ISC_GREEN)
+        self._inv_tq_feas_card  = MetricCard("MAX FEASIBLE", "Nm", color=F1_WARNING)
 
-        top_box.addWidget(fault_box, stretch=3)
-
-        # ACU Summary Metric Tiles
-        self._acu_vmin_card = MetricCard("MIN CELL", "mV", color=ISC_GREEN)
-        self._acu_vmax_card = MetricCard("MAX CELL", "mV", color=ISC_GREEN)
-        self._acu_vspread_card = MetricCard("ΔV SPREAD", "mV", color=F1_WARNING)
-        self._acu_tmin_card = MetricCard("MIN TEMP", "°C", color=F1_BLUE)
-        self._acu_tmax_card = MetricCard("MAX TEMP (HOT)", "°C", color=F1_ERROR)
-        self._acu_tavg_card = MetricCard("AVG TEMP", "°C", color=ISC_GREEN)
-        self._acu_tdt_card = MetricCard("MAX dT/dt", "°C/min", color=F1_WARNING)
-
-        for card in (self._acu_vmin_card, self._acu_vmax_card, self._acu_vspread_card,
-                     self._acu_tmin_card, self._acu_tmax_card, self._acu_tavg_card, self._acu_tdt_card):
-            card.setFixedWidth(115)
+        for card in (self._inv_dc_bus_card, self._inv_ac_pwr_card, self._inv_dc_pwr_card,
+                     self._inv_eff_card, self._inv_tq_est_card, self._inv_tq_feas_card):
+            card.setFixedWidth(118)
             top_box.addWidget(card, stretch=1)
 
         v.addLayout(top_box, stretch=1)
 
-        # ── 2. Middle Section: 95-Cell Voltage Matrix (5x19) ──────────────────
-        v_box = QGroupBox("95-CELL VOLTAGE MATRIX [mV] — 5 MODULES × 19 CELLS (CAN 0x4B0)")
-        v_box.setStyleSheet(
-            f"QGroupBox {{ color:{ISC_GREEN}; border:1px solid #3f3f46; "
+        # ── 2. Middle Section: FS 80 kW Power Limit Envelope & Torque Dynamics ─
+        mid_box = QHBoxLayout()
+        mid_box.setSpacing(8)
+
+        # 80 kW Formula Student Power Rule Monitor
+        pwr_group = QGroupBox("FORMULA STUDENT 80 kW POWER LIMIT ENVELOPE (CAN 0x466)")
+        pwr_group.setStyleSheet(
+            f"QGroupBox {{ color:#38bdf8; border:1px solid #3f3f46; "
             f"margin-top:10px; font-size:11px; font-weight:bold; }} "
             f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
-            f"padding:0 6px; color:{ISC_GREEN}; background:{F1_DARK_BG}; }}"
+            f"padding:0 6px; color:#38bdf8; background:{F1_DARK_BG}; }}"
         )
-        vb_lay = QVBoxLayout(v_box)
-        vb_lay.setContentsMargins(6, 10, 6, 6)
+        pv_lay = QVBoxLayout(pwr_group)
+        pv_lay.setContentsMargins(10, 12, 10, 10)
+        pv_lay.setSpacing(6)
 
-        self._table_voltages = QTableWidget(5, 19)
-        self._table_voltages.setVerticalHeaderLabels([f"Mod {i}" for i in range(5)])
-        self._table_voltages.setHorizontalHeaderLabels([f"C{c+1:02d}" for c in range(19)])
-        self._table_voltages.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._table_voltages.setSelectionMode(QAbstractItemView.NoSelection)
-        self._table_voltages.horizontalHeader().setDefaultSectionSize(46)
-        self._table_voltages.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table_voltages.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table_voltages.horizontalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{F1_TEXT}; font-size:10px; font-weight:bold;")
-        self._table_voltages.verticalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{ISC_GREEN}; font-size:10px; font-weight:bold;")
-        self._table_voltages.setStyleSheet(
-            f"QTableWidget {{ background:{F1_DARK_BG}; gridline-color:#2a2a2a; border:none; }}"
-        )
+        pwr_hdr = QHBoxLayout()
+        self._pwr_readout_lbl = QLabel("0.0 kW / 80.0 kW")
+        self._pwr_readout_lbl.setStyleSheet("color:#ffffff; font-size:15px; font-weight:bold; font-family:'Consolas', monospace;")
+        self._pwr_headroom_lbl = QLabel("Headroom: +80.0 kW remaining")
+        self._pwr_headroom_lbl.setStyleSheet("color:#10b981; font-size:12px; font-weight:bold;")
+        pwr_hdr.addWidget(self._pwr_readout_lbl)
+        pwr_hdr.addStretch()
+        pwr_hdr.addWidget(self._pwr_headroom_lbl)
+        pv_lay.addLayout(pwr_hdr)
 
-        for m in range(5):
-            for c in range(19):
-                item = QTableWidgetItem("0")
-                item.setTextAlignment(Qt.AlignCenter)
-                item.setFont(QFont("Segoe UI", 9, QFont.Bold))
-                item.setBackground(QBrush(QColor("#18181b")))
-                item.setForeground(QBrush(QColor(F1_TEXT)))
-                self._table_voltages.setItem(m, c, item)
+        self._pwr_envelope_bar = PowerEnvelopeBar()
+        pv_lay.addWidget(self._pwr_envelope_bar)
 
-        vb_lay.addWidget(self._table_voltages)
-        v.addWidget(v_box, stretch=3)
+        pwr_footer = QHBoxLayout()
+        pwr_footer.addWidget(self._lbl("Rule EV 2.2.1: 80 kW Electrical Power Limit", "color:#71717a; font-size:10px; font-weight:600;"))
+        pwr_footer.addStretch()
+        self._pwr_loss_lbl = QLabel("Estimated Inverter Loss: 0.0 kW")
+        self._pwr_loss_lbl.setStyleSheet("color:#94a3b8; font-size:10.5px; font-weight:600;")
+        pwr_footer.addWidget(self._pwr_loss_lbl)
+        pv_lay.addLayout(pwr_footer)
 
-        # ── 3. Bottom Section: 190-Sensor Thermal Matrix (5x38) ────────────────
-        t_box = QGroupBox("190-SENSOR THERMAL MATRIX [°C] — 5 MODULES × 38 NTC SENSORS (CAN 0x4B1)")
-        t_box.setStyleSheet(
+        mid_box.addWidget(pwr_group, stretch=1)
+
+        # Torque Headroom & Feasibility Monitor
+        tq_group = QGroupBox("TORQUE HEADROOM & FEASIBILITY CEILING (CAN 0x467 / 0x468)")
+        tq_group.setStyleSheet(
             f"QGroupBox {{ color:{F1_WARNING}; border:1px solid #3f3f46; "
             f"margin-top:10px; font-size:11px; font-weight:bold; }} "
             f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
             f"padding:0 6px; color:{F1_WARNING}; background:{F1_DARK_BG}; }}"
         )
-        tb_lay = QVBoxLayout(t_box)
-        tb_lay.setContentsMargins(6, 10, 6, 6)
+        tq_lay = QVBoxLayout(tq_group)
+        tq_lay.setContentsMargins(10, 12, 10, 10)
+        tq_lay.setSpacing(6)
 
-        self._table_temps = QTableWidget(5, 38)
-        self._table_temps.setVerticalHeaderLabels([f"Mod {i}" for i in range(5)])
-        self._table_temps.setHorizontalHeaderLabels([f"N{n+1:02d}" for n in range(38)])
-        self._table_temps.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._table_temps.setSelectionMode(QAbstractItemView.NoSelection)
-        self._table_temps.horizontalHeader().setDefaultSectionSize(26)
-        self._table_temps.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table_temps.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table_temps.horizontalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{F1_TEXT}; font-size:9px; font-weight:bold;")
-        self._table_temps.verticalHeader().setStyleSheet(f"background:{F1_MID_BG}; color:{F1_WARNING}; font-size:9px; font-weight:bold;")
-        self._table_temps.setStyleSheet(
-            f"QTableWidget {{ background:{F1_DARK_BG}; gridline-color:#2a2a2a; border:none; }}"
+        tq_hdr = QHBoxLayout()
+        self._tq_readout_lbl = QLabel("Estimated: 0 Nm | Feasible: 0 Nm")
+        self._tq_readout_lbl.setStyleSheet("color:#ffffff; font-size:15px; font-weight:bold; font-family:'Consolas', monospace;")
+        self._tq_headroom_lbl = QLabel("Ceiling Headroom: +0 Nm")
+        self._tq_headroom_lbl.setStyleSheet("color:#10b981; font-size:12px; font-weight:bold;")
+        tq_hdr.addWidget(self._tq_readout_lbl)
+        tq_hdr.addStretch()
+        tq_hdr.addWidget(self._tq_headroom_lbl)
+        tq_lay.addLayout(tq_hdr)
+
+        self._tq_bar = PowerEnvelopeBar()
+        tq_lay.addWidget(self._tq_bar)
+
+        tq_footer = QHBoxLayout()
+        tq_footer.addWidget(self._lbl("CAN 0x468 Torque_Est_Nm vs CAN 0x467 Torque_Max_Feas", "color:#71717a; font-size:10px; font-weight:600;"))
+        tq_footer.addStretch()
+        self._tq_status_desc_lbl = QLabel("Full motor authority available")
+        self._tq_status_desc_lbl.setStyleSheet("color:#94a3b8; font-size:10.5px; font-weight:600;")
+        tq_footer.addWidget(self._tq_status_desc_lbl)
+        tq_lay.addLayout(tq_footer)
+
+        mid_box.addWidget(tq_group, stretch=1)
+        v.addLayout(mid_box, stretch=2)
+
+        # ── 3. Bottom Section: 17 Inverter L1/L2 Sub-Fault Diagnostic Flags ──────
+        diag_box = QHBoxLayout()
+        diag_box.setSpacing(8)
+
+        # Panel A: L1 Power Stage Sub-Faults (9 Flags)
+        l1_group = QGroupBox("L1 POWER STAGE HARDWARE SUB-FAULTS — 9 FLAGS (CAN 0x461 BITS 47..55)")
+        l1_group.setStyleSheet(
+            f"QGroupBox {{ color:{F1_ERROR}; border:1px solid #3f3f46; "
+            f"margin-top:10px; font-size:11px; font-weight:bold; }} "
+            f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
+            f"padding:0 6px; color:{F1_ERROR}; background:{F1_DARK_BG}; }}"
         )
+        l1_lay = QGridLayout(l1_group)
+        l1_lay.setContentsMargins(8, 12, 8, 8)
+        l1_lay.setSpacing(6)
 
-        for m in range(5):
-            for n in range(38):
-                item = QTableWidgetItem("—")
-                item.setTextAlignment(Qt.AlignCenter)
-                item.setFont(QFont("Segoe UI", 8, QFont.Bold))
-                item.setBackground(QBrush(QColor("#18181b")))
-                item.setForeground(QBrush(QColor(F1_TEXT)))
-                self._table_temps.setItem(m, n, item)
+        self._l1_badges = {}
+        for idx, (code, title, tooltip, mask) in enumerate(L1_PWRSTG_FLAGS):
+            badge = DiagFlagBadge(code, title, tooltip)
+            self._l1_badges[mask] = badge
+            r, c = idx // 3, idx % 3
+            l1_lay.addWidget(badge, r, c)
 
-        tb_lay.addWidget(self._table_temps)
-        v.addWidget(t_box, stretch=3)
+        diag_box.addWidget(l1_group, stretch=1)
+
+        # Panel B: L2 EMCtrl FOC Control Diagnostics (8 Flags)
+        l2_group = QGroupBox("L2 EMCTRL FOC REAL-TIME DIAGNOSTICS — 8 FLAGS (CAN 0x461 BITS 39..46)")
+        l2_group.setStyleSheet(
+            f"QGroupBox {{ color:#a855f7; border:1px solid #3f3f46; "
+            f"margin-top:10px; font-size:11px; font-weight:bold; }} "
+            f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
+            f"padding:0 6px; color:#a855f7; background:{F1_DARK_BG}; }}"
+        )
+        l2_lay = QGridLayout(l2_group)
+        l2_lay.setContentsMargins(8, 12, 8, 8)
+        l2_lay.setSpacing(6)
+
+        self._l2_badges = {}
+        for idx, (code, title, tooltip, mask) in enumerate(L2_EMCTRL_FLAGS):
+            badge = DiagFlagBadge(code, title, tooltip)
+            self._l2_badges[mask] = badge
+            r, c = idx // 4, idx % 4
+            l2_lay.addWidget(badge, r, c)
+
+        diag_box.addWidget(l2_group, stretch=1)
+        v.addLayout(diag_box, stretch=3)
 
         return w
 
@@ -4080,7 +4304,7 @@ class MainWindow(QMainWindow):
         if current_idx == 0:
             self._render_overview_tab(snap, soc_vtc6, time_str)
         elif current_idx == 1:
-            self._update_acu_overview(snap)
+            self._update_inverter_diag(snap)
         elif current_idx == 2:
             self._update_customize(snap)
         elif current_idx == 3:
@@ -4103,7 +4327,7 @@ class MainWindow(QMainWindow):
         if idx == 0:
             self._render_overview_tab(snap, getattr(self, '_last_soc_vtc6', 0.0), getattr(self, '_last_time_str', 'STANDBY'))
         elif idx == 1:
-            self._update_acu_overview(snap)
+            self._update_inverter_diag(snap)
         elif idx == 2:
             self._update_customize(snap)
         elif idx == 3:
@@ -4361,268 +4585,111 @@ class MainWindow(QMainWindow):
         """Compatibility wrapper for overview updates."""
         self._render_overview_tab(s, getattr(self, '_last_soc_vtc6', 0.0), getattr(self, '_last_time_str', 'STANDBY'))
 
-    def _update_acu_overview(self, s: dict):
-        acu = rtt.get_acu_matrix()
-        if not acu:
-            return
+    def _update_inverter_diag(self, s: dict):
+        # 1. State Machine & DEM
+        inv_st = s.get('inv_state', 0)
+        dem = s.get('dem_code', s.get('inv_error', 0))
+        st_name = INVERTER_STATE_MAP.get(inv_st, f"{inv_st} (UNKNOWN)")
+        dem_name = INVERTER_ERRORS_MAP.get(dem, f"Fault {dem}")
 
-        voltages = acu.get('voltages_mv', [[0] * 19 for _ in range(5)])
-        temps = acu.get('temps_c', [[float('nan')] * 38 for _ in range(5)])
-        fault = acu.get('fault_status', {})
+        self._inv_state_lbl.setText(st_name)
+        if inv_st in (10, 11):
+            self._inv_state_lbl.setStyleSheet(f"color:{F1_ERROR}; font-size:12px; font-weight:bold;")
+        elif inv_st == 6:
+            self._inv_state_lbl.setStyleSheet("color:#10b981; font-size:12px; font-weight:bold;")
+        else:
+            self._inv_state_lbl.setStyleSheet(f"color:{F1_TEXT}; font-size:12px; font-weight:bold;")
 
-        # ── 1. Update Fault Card ─────────────────────────────────────────────
-        fsm_code = s.get('ams_fsm_state', fault.get('fsm_state', 0))
-        fsm_str = f"{fsm_code} ({AMS_FSM_STATE_MAP.get(fsm_code, 'UNKNOWN')})"
-        self._acu_fsm_lbl.setText(fsm_str)
-
-        reason_code = fault.get('fault_reason', 0)
-        reason_name = fault.get('fault_name', rtt.FAULT_REASON_NAMES.get(reason_code, f"Fault {reason_code}"))
-        latch_active = fault.get('latch_active', False)
-
-        if reason_code > 0 or latch_active or fsm_code == 5:
-            self._acu_fault_reason_lbl.setText(f"⚠ {reason_name}")
-            self._acu_fault_reason_lbl.setStyleSheet(f"color:{F1_ERROR}; font-size:12px; font-weight:bold;")
-            self._acu_fault_box.setStyleSheet(
+        if dem != 0:
+            self._inv_dem_lbl.setText(f"⚠ {dem} ({dem_name})")
+            self._inv_dem_lbl.setStyleSheet(f"color:{F1_ERROR}; font-size:12px; font-weight:bold;")
+            self._inv_diag_st_box.setStyleSheet(
                 f"QGroupBox {{ color:{F1_ERROR}; border:2px solid {F1_ERROR}; "
-                f"background:#200808; margin-top:14px; font-size:10px; font-weight:bold; }} "
+                f"background:#200808; margin-top:14px; font-size:11px; font-weight:bold; }} "
                 f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
                 f"padding:0 6px; color:{F1_ERROR}; background:{F1_DARK_BG}; }}"
             )
         else:
-            self._acu_fault_reason_lbl.setText("✓ No Fault")
-            self._acu_fault_reason_lbl.setStyleSheet("color:#10b981; font-size:12px; font-weight:bold;")
-            self._acu_fault_box.setStyleSheet(
-                f"QGroupBox {{ color:#444; border:1px solid #333; "
-                f"background:{F1_DARK_BG}; margin-top:14px; font-size:10px; font-weight:bold; }} "
+            self._inv_dem_lbl.setText("✓ 0 (No Fault)")
+            self._inv_dem_lbl.setStyleSheet("color:#10b981; font-size:12px; font-weight:bold;")
+            self._inv_diag_st_box.setStyleSheet(
+                f"QGroupBox {{ color:{ISC_GREEN}; border:1.5px solid #3f3f46; "
+                f"margin-top:14px; font-size:11px; font-weight:bold; }} "
                 f"QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; "
                 f"padding:0 6px; color:{ISC_GREEN}; background:{F1_DARK_BG}; }}"
             )
 
-        off_mod = fault.get('offending_module', 0xFF)
-        off_idx = fault.get('offending_cell_ntc', 0xFF)
-        if off_mod < 5:
-            type_str = "NTC" if "Temp" in reason_name else "Cell"
-            self._acu_offending_loc_lbl.setText(f"Module {off_mod} — {type_str} {off_idx:02d}")
+        vcfg = s.get('inv_vconfig_active', 0)
+        if vcfg:
+            self._inv_vcfg_lbl.setText("ACTIVE (DC BUS OK)")
+            self._inv_vcfg_lbl.setStyleSheet("color:#10b981; font-size:11.5px; font-weight:bold;")
         else:
-            self._acu_offending_loc_lbl.setText("None")
+            self._inv_vcfg_lbl.setText("WAITING (NO 0x466)")
+            self._inv_vcfg_lbl.setStyleSheet("color:#f59e0b; font-size:11.5px; font-weight:bold;")
 
-        tripped_val = fault.get('tripped_val', 0)
-        if tripped_val > 0:
-            unit_str = "°C" if "Temp" in reason_name else "mV"
-            self._acu_tripped_val_lbl.setText(f"{tripped_val} {unit_str}")
+        # 2. Metric Cards
+        dc_v = s.get('inv_dc_bus_V', 0)
+        self._inv_dc_bus_card.set_value(f"{dc_v}")
+
+        ac_kw = s.get('inv_ac_power_kW', 0.0)
+        dc_kw = s.get('dc_bus_power_kW', 0.0)
+        eff = s.get('inv_efficiency_pct', 0.0)
+
+        self._inv_ac_pwr_card.set_value(f"{ac_kw:.1f}")
+        self._inv_dc_pwr_card.set_value(f"{dc_kw:.1f}")
+        self._inv_dc_pwr_card.set_alert(dc_kw > 80.0)
+
+        eff_str = f"{eff:.1f}" if dc_kw > 0.5 and eff > 0 else "—"
+        self._inv_eff_card.set_value(eff_str)
+
+        tq_est = s.get('inv_torque_est_nm', 0)
+        tq_feas = s.get('inv_torque_max_feas', 0)
+        self._inv_tq_est_card.set_value(f"{tq_est}")
+        self._inv_tq_feas_card.set_value(f"{tq_feas}")
+
+        # Torque Limiting Status
+        if tq_feas > 0 and tq_est >= tq_feas:
+            self._inv_tq_limit_lbl.setText("CLAMPED BY INVERTER")
+            self._inv_tq_limit_lbl.setStyleSheet(f"color:{F1_WARNING}; font-size:11.5px; font-weight:bold;")
+            self._tq_status_desc_lbl.setText("Torque clamped to inverter ceiling (Vdc/RPM/Thermal limit)")
         else:
-            self._acu_tripped_val_lbl.setText("—")
+            self._inv_tq_limit_lbl.setText("NORMAL HEADROOM")
+            self._inv_tq_limit_lbl.setStyleSheet("color:#10b981; font-size:11.5px; font-weight:bold;")
+            self._tq_status_desc_lbl.setText("Full motor authority available")
 
-        if latch_active:
-            self._acu_latch_lbl.setText("🔴 ACTIVE (SHUTDOWN TRIPPED)")
-            self._acu_latch_lbl.setStyleSheet(f"color:{F1_ERROR}; font-size:11px; font-weight:bold;")
+        # 3. 80 kW Envelope & Headroom
+        self._pwr_envelope_bar.set_power(dc_kw, ac_kw)
+        self._pwr_readout_lbl.setText(f"{dc_kw:.1f} kW / 80.0 kW")
+        headroom = 80.0 - dc_kw
+        if headroom < 0:
+            self._pwr_headroom_lbl.setText(f"⚠ RULE VIOLATION: +{abs(headroom):.1f} kW EXCEEDED")
+            self._pwr_headroom_lbl.setStyleSheet(f"color:{F1_ERROR}; font-size:12px; font-weight:bold;")
+        elif headroom <= 5.0:
+            self._pwr_headroom_lbl.setText(f"⚠ Margin Warning: +{headroom:.1f} kW remaining")
+            self._pwr_headroom_lbl.setStyleSheet("color:#f97316; font-size:12px; font-weight:bold;")
         else:
-            self._acu_latch_lbl.setText("🟢 CLEAR (NORMAL)")
-            self._acu_latch_lbl.setStyleSheet("color:#10b981; font-size:11px; font-weight:bold;")
+            self._pwr_headroom_lbl.setText(f"Headroom: +{headroom:.1f} kW remaining")
+            self._pwr_headroom_lbl.setStyleSheet("color:#10b981; font-size:12px; font-weight:bold;")
 
-        err_bits = fault.get('err_bits', 0)
-        disc_mask = (err_bits >> 1) & 0x1F
-        open_mask = (err_bits >> 6) & 0x1F
-        tap_mask  = (err_bits >> 11) & 0x1F
-        self._acu_subfault_lbl.setText(f"DISC: 0x{disc_mask:02X} | OPEN: 0x{open_mask:02X} | TAP: 0x{tap_mask:02X}")
+        loss_kw = max(0.0, dc_kw - ac_kw)
+        self._pwr_loss_lbl.setText(f"Estimated Inverter Loss: {loss_kw:.1f} kW")
 
-        # ── 2. Update Voltage Matrix (95 cells) & Summary Cards ──────────────
-        all_v = []
-        min_v = 99999
-        max_v = 0
-        min_loc = (0, 0)
-        max_loc = (0, 0)
+        # Torque bar & headroom
+        tq_headroom = max(0, tq_feas - tq_est)
+        self._tq_readout_lbl.setText(f"Estimated: {tq_est} Nm | Max Feasible: {tq_feas} Nm")
+        self._tq_headroom_lbl.setText(f"Ceiling Headroom: +{tq_headroom} Nm")
+        self._tq_bar.set_power(float(tq_est) / 250.0 * 80.0 if tq_feas > 0 else 0.0, float(tq_feas) / 250.0 * 80.0 if tq_feas > 0 else 0.0)
 
-        for m in range(5):
-            for c in range(19):
-                v_cell = voltages[m][c] if m < len(voltages) and c < len(voltages[m]) else 0
-                if v_cell > 0:
-                    all_v.append(v_cell)
-                    if v_cell < min_v:
-                        min_v = v_cell
-                        min_loc = (m, c)
-                    if v_cell > max_v:
-                        max_v = v_cell
-                        max_loc = (m, c)
+        # 4. 17 Sub-Fault Diagnostic Flags
+        pwrstg_bits = s.get('inv_pwrstg_bits', 0)
+        emctrl_bits = s.get('inv_emctrl_bits', 0)
 
-        v_cache = getattr(self, '_acu_v_cache', {})
-        self._table_voltages.setUpdatesEnabled(False)
-        try:
-            # Fallback if CAN matrix not streamed yet: use snapshot per-module values
-            if not all_v and s.get('vmin_modulo'):
-                vm_mod = s.get('vmin_modulo', [0]*5)
-                vx_mod = s.get('vmax_modulo', [0]*5)
-                for m in range(5):
-                    vmin_m = vm_mod[m] if m < len(vm_mod) else 0
-                    vmax_m = vx_mod[m] if m < len(vx_mod) else 0
-                    if vmin_m > 0:
-                        for c in range(19):
-                            v_synth = int(vmin_m + (vmax_m - vmin_m) * (c / 18.0)) if vmax_m > vmin_m else vmin_m
-                            all_v.append(v_synth)
-                            if v_synth < min_v: min_v = v_synth; min_loc = (m, c)
-                            if v_synth > max_v: max_v = v_synth; max_loc = (m, c)
-                            key = (m, c)
-                            text_str = str(v_synth)
-                            bg_hex = "#064e3b"
-                            fg_hex = "#e0e0e0"
-                            if v_cache.get(key) != (text_str, bg_hex, fg_hex):
-                                item = self._table_voltages.item(m, c)
-                                if item:
-                                    item.setText(text_str)
-                                    item.setBackground(QBrush(QColor(bg_hex)))
-                                    item.setForeground(QBrush(QColor(fg_hex)))
-                                v_cache[key] = (text_str, bg_hex, fg_hex)
-            elif all_v:
-                for m in range(5):
-                    for c in range(19):
-                        v_cell = voltages[m][c]
-                        text_str = str(v_cell) if v_cell > 0 else "0"
-                        if v_cell == 0:
-                            bg_hex = "#18181b"
-                            fg_hex = "#666666"
-                        elif v_cell < 3000:
-                            bg_hex = "#7f1d1d"   # Critical red
-                            fg_hex = "#ffffff"
-                        elif v_cell < 3300:
-                            bg_hex = "#78350f"   # Warning amber
-                            fg_hex = "#fef08a"
-                        elif v_cell > 4200:
-                            bg_hex = "#581c87"   # Overvoltage purple
-                            fg_hex = "#ffffff"
-                        elif (m, c) == min_loc:
-                            bg_hex = "#0284c7"   # Highlight min in cyan
-                            fg_hex = "#ffffff"
-                        elif (m, c) == max_loc:
-                            bg_hex = "#0d9488"   # Highlight max in teal
-                            fg_hex = "#ffffff"
-                        else:
-                            bg_hex = "#064e3b"   # Nominal dark green
-                            fg_hex = "#e0e0e0"
+        for mask, badge in self._l1_badges.items():
+            badge.set_active(bool(pwrstg_bits & mask))
 
-                        key = (m, c)
-                        if v_cache.get(key) != (text_str, bg_hex, fg_hex):
-                            item = self._table_voltages.item(m, c)
-                            if item:
-                                item.setText(text_str)
-                                item.setBackground(QBrush(QColor(bg_hex)))
-                                item.setForeground(QBrush(QColor(fg_hex)))
-                            v_cache[key] = (text_str, bg_hex, fg_hex)
-        finally:
-            self._table_voltages.setUpdatesEnabled(True)
+        for mask, badge in self._l2_badges.items():
+            badge.set_active(bool(emctrl_bits & mask))
 
-        if all_v:
-            v_spread = max_v - min_v
-            self._acu_vmin_card.set_value(f"{min_v}")
-            self._acu_vmax_card.set_value(f"{max_v}")
-            self._acu_vspread_card.set_value(f"{v_spread}")
-            self._acu_vspread_card.set_alert(v_spread > 100)
-        else:
-            self._acu_vmin_card.set_value("—")
-            self._acu_vmax_card.set_value("—")
-            self._acu_vspread_card.set_value("—")
-
-        # ── 3. Update Thermal Matrix (190 NTCs) & Summary Cards ───────────────
-        all_t = []
-        min_t = 999.0
-        max_t = -999.0
-        hot_loc = (0, 0)
-
-        for m in range(5):
-            for n in range(38):
-                t_val = temps[m][n] if m < len(temps) and n < len(temps[m]) else float('nan')
-                if not math.isnan(t_val) and t_val != -128:
-                    all_t.append(t_val)
-                    if t_val < min_t: min_t = t_val
-                    if t_val > max_t: max_t = t_val; hot_loc = (m, n)
-
-        t_cache = getattr(self, '_acu_t_cache', {})
-        self._table_temps.setUpdatesEnabled(False)
-        try:
-            # Fallback if CAN thermal matrix not streamed yet: use snapshot per-module tmax
-            if not all_t and s.get('temp_max_modulo'):
-                tmax_mod = s.get('temp_max_modulo', [0]*5)
-                for m in range(5):
-                    tm = float(tmax_mod[m]) if m < len(tmax_mod) else 0.0
-                    if tm > 0:
-                        for n in range(38):
-                            t_synth = tm - random.uniform(0.5, 3.0)
-                            all_t.append(t_synth)
-                            if t_synth < min_t: min_t = t_synth
-                            if t_synth > max_t: max_t = t_synth; hot_loc = (m, n)
-                            key = (m, n)
-                            text_str = f"{t_synth:.0f}"
-                            bg_hex = "#064e3b"
-                            fg_hex = "#e0e0e0"
-                            if t_cache.get(key) != (text_str, bg_hex, fg_hex):
-                                item = self._table_temps.item(m, n)
-                                if item:
-                                    item.setText(text_str)
-                                    item.setBackground(QBrush(QColor(bg_hex)))
-                                    item.setForeground(QBrush(QColor(fg_hex)))
-                                t_cache[key] = (text_str, bg_hex, fg_hex)
-            elif all_t:
-                for m in range(5):
-                    for n in range(38):
-                        t_val = temps[m][n]
-                        if math.isnan(t_val) or t_val == -128:
-                            text_str = "—"
-                            bg_hex = "#18181b"
-                            fg_hex = "#555555"
-                        else:
-                            text_str = f"{t_val:.0f}"
-                            if t_val >= 60.0:
-                                bg_hex = "#991b1b"   # Critical red (>60°C)
-                                fg_hex = "#ffffff"
-                            elif t_val >= 50.0:
-                                bg_hex = "#c2410c"   # Elevated orange (50..59°C)
-                                fg_hex = "#ffffff"
-                            elif t_val >= 40.0:
-                                bg_hex = "#b45309"   # Warm amber (40..49°C)
-                                fg_hex = "#fef08a"
-                            elif (m, n) == hot_loc:
-                                bg_hex = "#e11d48"   # Hotspot highlight
-                                fg_hex = "#ffffff"
-                            else:
-                                bg_hex = "#065f46"   # Cool nominal green (<40°C)
-                                fg_hex = "#e0e0e0"
-
-                        key = (m, n)
-                        if t_cache.get(key) != (text_str, bg_hex, fg_hex):
-                            item = self._table_temps.item(m, n)
-                            if item:
-                                item.setText(text_str)
-                                item.setBackground(QBrush(QColor(bg_hex)))
-                                item.setForeground(QBrush(QColor(fg_hex)))
-                            t_cache[key] = (text_str, bg_hex, fg_hex)
-        finally:
-            self._table_temps.setUpdatesEnabled(True)
-
-        if all_t:
-            avg_t = sum(all_t) / len(all_t)
-            self._acu_tmin_card.set_value(f"{min_t:.1f}")
-            self._acu_tmax_card.set_value(f"{max_t:.1f}")
-            self._acu_tavg_card.set_value(f"{avg_t:.1f}")
-            self._acu_tmax_card.set_alert(max_t >= 55.0)
-
-            # Rate of rise tracking
-            now = time.time()
-            if not hasattr(self, '_last_tmax_val'):
-                self._last_tmax_val = max_t
-                self._last_tmax_time = now
-                self._acu_tdt_card.set_value("+0.0")
-            else:
-                dt_min = (now - self._last_tmax_time) / 60.0
-                if dt_min >= 0.05:
-                    rate = (max_t - self._last_tmax_val) / dt_min
-                    self._acu_tdt_card.set_value(f"{rate:+.1f}")
-                    self._acu_tdt_card.set_alert(rate > 5.0)
-                    self._last_tmax_val = max_t
-                    self._last_tmax_time = now
-        else:
-            self._acu_tmin_card.set_value("—")
-            self._acu_tmax_card.set_value("—")
-            self._acu_tavg_card.set_value("—")
-            self._acu_tdt_card.set_value("—")
 
     def _update_powertrain(self, s: dict):
         self._rpm_gauge.set_rpm(s.get('inv_rpm', 0))

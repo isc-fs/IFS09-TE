@@ -82,6 +82,27 @@ MARPLE_SIGNAL_MAP = {
         'unit': 'Nm',
         'desc': 'Inverter maximum feasible torque limit (CAN 0x467 EMC_TX_STATE_8)',
     },
+    # ── Powertrain Electrical Power & Efficiency [bytes 103-106] ─────────────
+    'inv_ac_power_W': {
+        'path': 'Powertrain/Electrical/AC_Power_W',
+        'unit': 'W',
+        'desc': 'Inverter AC delivered electrical power to motor phases (CAN 0x466 bytes 3-5)',
+    },
+    'inv_ac_power_kW': {
+        'path': 'Powertrain/Electrical/AC_Power_kW',
+        'unit': 'kW',
+        'desc': 'Inverter AC delivered power (kW)',
+    },
+    'dc_bus_power_kW': {
+        'path': 'Powertrain/Electrical/DC_Power_kW',
+        'unit': 'kW',
+        'desc': 'DC Bus electrical power (Vdc x Ipack, kW)',
+    },
+    'inv_efficiency_pct': {
+        'path': 'Powertrain/Electrical/Inverter_Efficiency_pct',
+        'unit': '%',
+        'desc': 'Instantaneous inverter electrical efficiency (Pac / Pdc * 100%)',
+    },
     # ── Powertrain Diagnostics & Subfault Bits [bytes 100-101] ────────────────
     'inv_subfault_bits': {
         'path': 'Powertrain/Diagnostics/Subfault_Bits',
