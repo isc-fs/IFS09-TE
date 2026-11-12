@@ -90,3 +90,7 @@ desktop.ini
 !.vscode/tasks.json
 !.vscode/launch.json
 .idea/
+
+# Secrets / local caches
+.env
+.mdb_cache/

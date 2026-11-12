@@ -1,0 +1,1 @@
+{ "version": "0.2.0", "configurations": [ { "name": "ISCmetrics (ui.py)", "type": "debugpy", "request": "launch", "program": "${workspaceFolder}/isc_realtime_26/ui.py", "cwd": "${workspaceFolder}/isc_realtime_26", "console": "integratedTerminal" } ] }

@@ -33,6 +33,7 @@ from collections import deque
 import csv
 import math
 import logging
+import queue
 import struct
 import threading
 import time
@@ -48,6 +49,7 @@ import serial
 import serial.tools.list_ports
 
 import isc_marple
+import radio_protocol as rp
 
 # ================== CONFIG RF ==================
 # Must match Core/Src/nrf24.c and docs/RADIO_SNAPSHOT_MAP.md in IFS08-CE-ECU
@@ -63,21 +65,17 @@ RF_EXPECTED = {
 
 
 # ================== FRAGMENT PROTOCOL CONSTANTS ==================
-# Must mirror the STM32 TX (telemetry_task.cpp on feat/telemetry-port)
-MAGIC            = 0xEC   # buf[0]
-VERSION_LEGACY   = 0x02   # buf[1]
-VERSION_SNAPSHOT = 0x03   # buf[1]
-VERSION          = 0x02   # legacy expected version default
-KIND_FAST        = 0x03   # buf[6]
-KIND_SLOW        = 0x04   # buf[6]
-KIND_SNAPSHOT    = 0x06   # buf[6]
-KIND_STATUS      = 0x99   # buf[6] custom status code from Arduino
-FRAG_FAST        = 2
-FRAG_SLOW        = 5
-FRAG_SNAPSHOT    = 5
-HDR_SIZE      = 8      # bytes 0-7 are the fragment header
-DATA_SIZE     = 24     # bytes 8-31 are the data slice
-SNAPSHOT_SIZE = 102    # backward compatibility for CSV headers/IMU
+# IFS-09 v4: ONE compact 120-byte snapshot per cycle (5 x 24 B slices), no fast/slow
+# split. Wire layout + decoder live in radio_protocol.py (mirror of the STM32
+# Core/Src/app/radio_snapshot.cpp).
+MAGIC            = rp.MAGIC             # buf[0]
+VERSION_SNAPSHOT = rp.VERSION_SNAPSHOT  # buf[1] = 0x04
+KIND_SNAPSHOT    = rp.KIND_SNAPSHOT     # buf[6]
+KIND_STATUS      = 0x99                 # buf[6] custom status code from Arduino
+FRAG_SNAPSHOT    = rp.FRAG_SNAPSHOT
+HDR_SIZE         = rp.HDR_SIZE          # bytes 0-7 are the fragment header
+DATA_SIZE        = rp.DATA_SIZE         # bytes 8-31 are the data slice
+SNAPSHOT_SIZE    = rp.SNAPSHOT_SIZE
 
 
 # ================== SERIAL FRAMING CONSTANTS ==================
@@ -138,6 +136,15 @@ data_str       = ""
 new_data_flag  = 0
 latest_data_dict: dict = {}
 
+# Thread-safety contract (RX thread  ->  UI thread):
+#   * The RX thread is the ONLY writer. It never mutates a published snapshot dict;
+#     it builds a NEW merged dict and swaps the reference under _data_lock.
+#   * The UI thread only reads (get_latest_data()/get_snapshot()) and never blocks on
+#     serial or disk I/O. data_version increases by 1 per published snapshot so the UI
+#     can skip redraws when nothing new arrived.
+_data_lock = threading.RLock()
+data_version: int = 0
+
 _status: dict = {"badge": "STALE", "reason": "inicio", "ts": 0}
 _receiver_status: dict = {"hw_status": "OK", "last_update": 0.0}
 _last_received_snap_seq: Optional[int] = None
@@ -170,6 +177,19 @@ class AMSModule:
 ams_modules: List[AMSModule] = [AMSModule(i) for i in range(NUM_MODULES)]
 
 # ================== CSV LOGGER ==================
+# New IFS-09 channels (DTI inverters, LWS, IMU, extended inverter diagnostics).
+# Appended before "notes" so existing Marple channel names are unchanged.
+_DTI_FIELDS = ("erpm", "mech_rpm", "wheel_kmh", "duty_pct", "vin_V", "ac_A", "dc_A",
+               "ctrl_temp_C", "motor_temp_C", "fault", "drive_en", "valid")
+EXTRA_CSV_COLS: List[str] = (
+    ["inv_pwrstg_bits", "inv_torque_est_nm", "inv_torque_max_feas", "inv_ac_power_W", "vehicle_speed_kmh"]
+    + [f"dti_{side}_{f}" for side in ("l", "r") for f in _DTI_FIELDS]
+    + ["dti_speed_delta_kmh", "dti_dc_total_A", "dti_ac_total_A",
+       "lws_angle_deg", "lws_speed_dps", "lws_status", "lws_valid",
+       "imu_yaw_rate_rads", "imu_ay_mps2", "imu_ax_mps2", "imu_valid"]
+)
+
+
 class SerialCSVLogger:
     """
     Flat CSV logger compatible with Marple Data.
@@ -213,6 +233,7 @@ class SerialCSVLogger:
         # ── Pit-Wall Notes ──────────────────────────────────────────────────
         "notes",
     ]
+    HEADERS = HEADERS[:-1] + EXTRA_CSV_COLS + ["notes"]
 
     def __init__(self, bucket_id: str, piloto: str, circuito: str, flush_every: int = 50):
         self.bucket_id    = bucket_id
@@ -228,6 +249,36 @@ class SerialCSVLogger:
 
         self.writer.writerow(self.HEADERS)
         logger.info(f"CSV Logger iniciado: {self.filename}")
+
+        # Disk I/O lives in its own thread: the RX thread only enqueues rows, so a slow
+        # disk / antivirus scan can never stall serial reception (or the UI).
+        self._q: "queue.Queue[Optional[list]]" = queue.Queue(maxsize=5000)
+        self.dropped_rows = 0
+        self._writer_thread = threading.Thread(target=self._drain, name="csv-writer", daemon=True)
+        self._writer_thread.start()
+
+    def _drain(self) -> None:
+        pending = 0
+        while True:
+            try:
+                row = self._q.get(timeout=1.0)
+            except queue.Empty:
+                if pending:
+                    self.file.flush(); pending = 0
+                continue
+            if row is None:
+                break
+            self.writer.writerow(row)
+            pending += 1
+            if pending >= self.flush_every or self._q.empty():
+                self.file.flush(); pending = 0
+        self.file.flush()
+
+    def _enqueue(self, row: list) -> None:
+        try:
+            self._q.put_nowait(row)
+        except queue.Full:
+            self.dropped_rows += 1
 
     def log_snapshot(self, data_dict: dict) -> None:
         """Write one row from the latest decoded snapshot."""
@@ -277,13 +328,12 @@ class SerialCSVLogger:
             s.get('thermal_dt_dt',        ""), s.get('thermal_t_overtemp',     ""),
             s.get('batt_r_int',           ""),
             s.get('strategy_pwr_target',  ""), s.get('strategy_rec_torque',    ""),
+            *(s.get(c, 0) for c in EXTRA_CSV_COLS),
             "",  # Empty note for telemetry snapshots
         ]
 
-        self.writer.writerow(row)
+        self._enqueue(row)
         self.record_count += 1
-        if self.record_count % self.flush_every == 0:
-            self.file.flush()
 
     def write_note(self, text: str) -> None:
         """Write a custom comment/note row into the CSV file."""
@@ -292,15 +342,16 @@ class SerialCSVLogger:
             elapsed    = time.time() - self.start_time
             # Create a row with timestamp and note, leaving all telemetry columns empty
             row = [current_ts, f"{elapsed:.3f}"] + [""] * (len(self.HEADERS) - 3) + [text]
-            self.writer.writerow(row)
-            self.file.flush()
+            self._enqueue(row)
         except Exception as e:
             logger.error(f"Error writing note to CSV: {e}")
 
     def close(self) -> Optional[str]:
         if self.file:
+            self._q.put(None)                       # sentinel: drain everything, then stop
+            self._writer_thread.join(timeout=10.0)
             self.file.close()
-            logger.info(f"CSV cerrado. Registros: {self.record_count}")
+            logger.info(f"CSV cerrado. Registros: {self.record_count} (descartados: {self.dropped_rows})")
             return str(self.filename)
         return None
 
@@ -423,7 +474,7 @@ def _validate_fragment(payload: bytes) -> bool:
     if kind == KIND_STATUS:
         return True
 
-    # --- Current protocol: version 3, kind 6, 5 fragments ---
+    # --- v4 compact snapshot: version 0x04, kind 6, 5 fragments ---
     if ver == VERSION_SNAPSHOT and kind == KIND_SNAPSHOT:
         if ftot != FRAG_SNAPSHOT:
             logger.debug(f"[DROP] bad SNAPSHOT frag_tot: {ftot}")
@@ -432,25 +483,6 @@ def _validate_fragment(payload: bytes) -> bool:
             logger.debug(f"[DROP] bad SNAPSHOT frag_idx: {fidx}")
             return False
         return True
-
-    # --- Legacy protocol: version 2, kind FAST/SLOW ---
-    if ver == VERSION_LEGACY:
-        if kind == KIND_FAST:
-            if ftot != FRAG_FAST:
-                logger.debug(f"[DROP] bad FRAG_FAST frag_tot: {ftot}")
-                return False
-            if fidx >= FRAG_FAST:
-                logger.debug(f"[DROP] bad FRAG_FAST frag_idx: {fidx}")
-                return False
-            return True
-        if kind == KIND_SLOW:
-            if ftot != FRAG_SLOW:
-                logger.debug(f"[DROP] bad FRAG_SLOW frag_tot: {ftot}")
-                return False
-            if fidx >= FRAG_SLOW:
-                logger.debug(f"[DROP] bad FRAG_SLOW frag_idx: {fidx}")
-                return False
-            return True
 
     logger.debug(f"[DROP] unknown version/kind: ver={ver} kind={kind}")
     return False
@@ -517,142 +549,12 @@ def _process_fragment(payload: bytes) -> Optional[Tuple[int, int, bytes]]:
 
 
 # ================== SNAPSHOT DECODER ==================
-# Pre-compiled struct formats matching telemetry_task.cpp on feat/telemetry-port
-_SNAP_FMT_FAST = struct.Struct("<BBBBBBBBBHHHHHH3xHHHi14x")
-_SNAP_FMT_SLOW = struct.Struct("<Bhhh8xI5x24x5H14x5H14x5h14x")
-
-
-def _decode_fast_snapshot(data: bytes, seq: int) -> dict:
-    if len(data) < 48:
-        logger.warning(f"_decode_fast_snapshot: short buffer ({len(data)} < 48)")
-        return {}
-    unpacked = _SNAP_FMT_FAST.unpack(data)
-    return {
-        'seq': seq,
-        'ctrl_state':        unpacked[0],
-        'inv_state':         unpacked[1],
-        'ams_fsm_state':     unpacked[2],
-        'start_button':      unpacked[3],
-        'ok_precharge':      unpacked[4],
-        'ev_2_3':            unpacked[5],
-        't11_8_9':           unpacked[6],
-        'last_vconfig_tick': unpacked[7],
-        'inv_error':         unpacked[8],
-        'dem_code':          unpacked[8],   # Alias for inv_error (DEM_Code from EMC_TX_STATE_2)
-        'emctrl_foc_bitstate': 0,
-        'torque_pct':        unpacked[9],
-        'inv_dc_bus_V':      unpacked[10],
-        'v_cell_min_mV':     unpacked[11],
-        'apps1_raw':         unpacked[12],
-        'apps2_raw':         unpacked[13],
-        'brake_raw':         unpacked[14],
-        # DBC EMC_TX_STATE_5 (0x464): physical_degC = raw_byte - 50  (scale=1, offset=-50)
-        # Raw 255 → 205°C = out-of-range / sensor disconnected marker
-        # Raw   0 → -50°C = minimum of valid range
-        'inv_temp_motor1':   unpacked[15] - 50,   # EMachine_Temp_1 (Sensor 1, disconnected)
-        'inv_temp_motor2':   unpacked[16] - 50,   # EMachine_Temp_2 (Motor KTY sensor)
-        'inv_temp_pwrstg':   unpacked[17] - 50,   # PwrStg / IGBT Temp
-        'inv_temp_board':    unpacked[17] - 50,   # Board_Temp
-        'inv_rpm':           int(round(unpacked[18] / 10.0)),
-        'inv_speed_actual':   round((unpacked[18] / 10.0) * (11.0 / 32.0) * (2.0 * math.pi / 60.0) * 0.2032 * 3.6, 1),
-    }
-
-
-def _decode_slow_snapshot(data: bytes, seq: int) -> dict:
-    if len(data) < 120:
-        logger.warning(f"_decode_slow_snapshot: short buffer ({len(data)} < 120)")
-        return {}
-    unpacked = _SNAP_FMT_SLOW.unpack(data)
-    return {
-        'seq': seq,
-        'soc':             unpacked[0],
-        'corriente_accu':  unpacked[1] / 10.0,
-        'corriente_dcdc':  -unpacked[2] / 10.0,
-        'temp_dcdc':       unpacked[3],
-        'tick_ms':         unpacked[4],
-        'vmin_modulo':     list(unpacked[5:10]),
-        'vmax_modulo':     list(unpacked[10:15]),
-        'temp_max_modulo': list(unpacked[15:20]),
-    }
-
-
-_SNAP_FMT_FLAT = struct.Struct("<I H B H H H H B B B B B H B 5H 5H h h h 5h B B B H H H H i i i 20x")
-
 def _decode_flat_snapshot(data: bytes, seq: int) -> dict:
-    if len(data) < 102:
-        logger.warning(f"_decode_flat_snapshot: short buffer ({len(data)} < 102)")
-        return {}
-    unpacked = _SNAP_FMT_FLAT.unpack(data[:102])
-    
-    # Extract list values
-    vmin_modulo = list(unpacked[14:19])
-    vmax_modulo = list(unpacked[19:24])
-    temp_max_modulo = list(unpacked[27:32])
-    
-    # ── GPS fields [bytes 82..95] ─────────────────────────────────────────────
-    # Always read raw; scale only when has_fix == 1 to avoid stale position
-    # being shown as live after the fix drops.  If fix is 0 the position
-    # registers hold the last valid values — intentional ECU behaviour.
-    _gps_has_fix    = data[95]
-    _gps_lat_raw    = struct.unpack_from('<i', data, 82)[0]   # int32 LE degrees × 1e7
-    _gps_lon_raw    = struct.unpack_from('<i', data, 86)[0]   # int32 LE degrees × 1e7
-    _gps_spd_raw    = struct.unpack_from('<H', data, 90)[0]   # uint16 LE km/h × 100
-    _gps_crs_raw    = struct.unpack_from('<H', data, 92)[0]   # uint16 LE deg × 100
-    _gps_sats       = data[94]
-
-    return {
-        'tick_ms':            unpacked[0],
-        'seq':                seq, # unpacked[1] is seq as well, but we pass it
-        'start_button':       unpacked[2],
-        'apps1_raw':          unpacked[3],
-        'apps2_raw':          unpacked[4],
-        'brake_raw':          unpacked[5],
-        'torque_pct':         unpacked[6],
-        'ev_2_3':             unpacked[7],
-        't11_8_9':            unpacked[8],
-        'state':              unpacked[9], # ECU CtrlState FSM (0=WAIT_VDC, 1=PRECHARGE, 2=WAIT_START, 3=R2D_DELAY, 4=WAIT_STANDBY, 5=ACTIVE, 6=AMS_ERROR)
-        'ctrl_state':         unpacked[9], # Alias for backward compatibility
-        'ok_precharge':       unpacked[10],
-        'ams_fsm_state':      unpacked[11],
-        'v_cell_min_mV':      unpacked[12],
-        'soc':                unpacked[13],
-        'vmin_modulo':        vmin_modulo,
-        'vmax_modulo':        vmax_modulo,
-        'corriente_accu':     unpacked[24] / 10.0,
-        'corriente_dcdc':     -unpacked[25] / 10.0,
-        'temp_dcdc':          unpacked[26],
-        'temp_max_modulo':    temp_max_modulo,
-        'inv_state':          unpacked[32],
-        'inv_vconfig_active': 1 if unpacked[33] > 0 else 0,
-        'last_vconfig_tick':  unpacked[33],
-        'inv_error':          unpacked[34],
-        'dem_code':           unpacked[34],  # Alias for inv_error (DEM_Code from EMC_TX_STATE_2)
-        'emctrl_foc_bitstate': 0,
-        'inv_dc_bus_V':       unpacked[35],
-        # DBC EMC_TX_STATE_5 (0x464): physical_degC = raw_byte - 50  (scale=1, offset=-50)
-        'inv_temp_motor1':    unpacked[36] - 50,  # EMachine_Temp_1_degC (Sensor 1, disconnected → 205°C)
-        'inv_temp_motor2':    unpacked[37] - 50,  # EMachine_Temp_2_degC (Sensor 2, Motor Winding NTC)
-        'inv_temp_pwrstg':    unpacked[37] - 50,  # Backward-compat alias for Sensor 2
-        'inv_temp_board':     unpacked[38] - 50,  # Board_Temp_degC
-        'inv_rpm':            int(unpacked[39]),  # eRPM directly (electrical RPM from 0x463)
-        'inv_speed_actual':   round((abs(unpacked[39]) / 10.0) * (11.0 / 32.0) * (2.0 * math.pi / 60.0) * 0.2032 * 3.6, 1) if unpacked[39] != 0 else 0.0,
-        'inv_current_actual': -unpacked[41],
-
-        # ── GPS [bytes 82..95] ───────────────────────────────────────────────
-        # Scaled human-readable values (always present; gate display on gps_has_fix)
-        'gps_lat_deg':    round(_gps_lat_raw / 1e7, 7),
-        'gps_lon_deg':    round(_gps_lon_raw / 1e7, 7),
-        'gps_speed_kmh':  round(_gps_spd_raw / 100.0, 2),
-        'gps_course_deg': round(_gps_crs_raw / 100.0, 2),
-        'gps_sats':       _gps_sats,
-        'gps_has_fix':    _gps_has_fix,
-        # Raw wire values (for diagnostics / round-trip tests)
-        'gps_lat_deg1e7':     _gps_lat_raw,
-        'gps_lon_deg1e7':     _gps_lon_raw,
-        'gps_speed_kmh_x100': _gps_spd_raw,
-        'gps_course_deg_x100':_gps_crs_raw,
-    }
-
+    """Decode the v4 120-byte snapshot (see radio_protocol.decode_snapshot)."""
+    snap = rp.decode_snapshot(data, seq)
+    if not snap:
+        logger.warning(f"_decode_flat_snapshot: short buffer ({len(data)} < {SNAPSHOT_SIZE})")
+    return snap
 
 
 # ================== SNAPSHOT → GLOBAL STATE ==================
@@ -703,7 +605,7 @@ def parse_snapshot(snap: dict, kind: Optional[int] = None) -> None:
     }
 
     # Calculate LQI rolling success rate for both fast and flat-snapshot packets
-    if kind in (KIND_FAST, KIND_SNAPSHOT):
+    if kind == KIND_SNAPSHOT:
         seq = snap.get('seq', 0)
         if _last_received_snap_seq is not None:
             diff = (seq - _last_received_snap_seq) & 0xFFFF
@@ -750,9 +652,33 @@ def create_bucket(piloto: str, circuito: str, use_influx: bool = False) -> str:
     return f"ISC_{ts}_{safe_piloto}_{safe_circuito}"
 
 def get_latest_data(data_id: Optional[str] = None):
-    if data_id:
-        return latest_data_dict.get(data_id, {})
-    return latest_data_dict.copy()
+    with _data_lock:
+        if data_id:
+            return latest_data_dict.get(data_id, {})
+        return latest_data_dict.copy()
+
+
+def get_snapshot() -> dict:
+    """Latest decoded snapshot. Treat the returned dict as read-only (copy-on-write)."""
+    with _data_lock:
+        return latest_data_dict.get('snapshot', {})
+
+
+def publish_snapshot(update: dict, kind: Optional[int] = None) -> None:
+    """RX-thread entry point: merge `update` into a NEW snapshot dict and publish it."""
+    global data_version
+    with _data_lock:
+        merged = dict(latest_data_dict.get('snapshot', {}))
+        merged.update(update)
+        parse_snapshot(merged, kind=kind)      # swaps latest_data_dict['snapshot'] = merged
+        data_version += 1
+
+
+def bump_version() -> None:
+    """For producers that write latest_data_dict directly (demo mode)."""
+    global data_version
+    with _data_lock:
+        data_version += 1
 
 
 # ================== POST-RACE DATA INJECTION ==================
@@ -1027,6 +953,11 @@ def merge_ams_temps_into_session(
                     rename_map[src_col] = dest_col
 
         ams_subset = ams_df[cols_to_merge].rename(columns=rename_map)
+        # pandas>=3 can load these as object/str; merge_asof needs numeric keys
+        ams_subset['_aligned_tick'] = pd.to_numeric(ams_subset['_aligned_tick'], errors='coerce')
+        ams_subset = ams_subset.dropna(subset=['_aligned_tick'])
+        ams_subset['_aligned_tick'] = ams_subset['_aligned_tick'].astype('int64')
+        session_df['tick_ms'] = pd.to_numeric(session_df['tick_ms'], errors='coerce').fillna(0).astype('int64')
         ams_subset.sort_values('_aligned_tick', inplace=True)
 
         # Sort session_df by tick_ms for merge_asof
@@ -1224,20 +1155,13 @@ def receive_data(bucket_id: str,
             kind, seq, snapshot_bytes = result
             counters["snapshot"] += 1
 
-            snap_update = {}
-            if kind == KIND_SNAPSHOT:
-                snap_update = _decode_flat_snapshot(snapshot_bytes, seq)
-            elif kind == KIND_FAST:
-                snap_update = _decode_fast_snapshot(snapshot_bytes, seq)
-            elif kind == KIND_SLOW:
-                snap_update = _decode_slow_snapshot(snapshot_bytes, seq)
+            snap_update = _decode_flat_snapshot(snapshot_bytes, seq) if kind == KIND_SNAPSHOT else {}
 
             if not snap_update:
                 _set_badge("BAD", "decode_fail")
                 continue
 
-            latest_data_dict['snapshot'].update(snap_update)
-            parse_snapshot(latest_data_dict['snapshot'], kind=kind)
+            publish_snapshot(snap_update, kind=kind)
             new_data_flag = 1
 
             if now - last_log_t >= 0.1:

@@ -51,13 +51,15 @@ from PyQt5.QtWidgets import (
     QWidget, QLabel, QPushButton, QLineEdit, QComboBox, QTextEdit,
     QMessageBox, QTabWidget, QFrame, QGroupBox, QCheckBox,
     QListWidget, QListWidgetItem, QDialog, QSizePolicy, QInputDialog,
-    QProgressBar, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView
+    QProgressBar, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView,
+    QFileDialog
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
 import ISC_RTT_serial as rtt
+import isc_marple
 
 # ── Optional demo module ──────────────────────────────────────────────────────
 try:
@@ -247,6 +249,22 @@ APPS2_MAX    = 3040   # raw ADC value at 100% depression
 BRK_MIN      = 582    # brake ADC resting floor (reads ~580-584 at rest, hardcoded default)
 BRK_MAX      = ADC_MAX  # brake ADC at full depression (overridden by calibration wizard)
 RPM_MAX      = 6000
+
+# IFS-09 dual DTI inverters / sensors
+DTI_CTRL_TEMP_WARN_C  = 85.0   # °C — DTI semiconductor temperature warning
+DTI_MOTOR_TEMP_WARN_C = 110.0  # °C — motor winding temperature warning
+DTI_SPEED_MAX_KMH     = 130.0  # bar scale for wheel speed
+DTI_AC_MAX_A          = 250.0  # bar scale for phase current
+# DTI HV (VESC-based firmware) fault codes
+DTI_FAULT_NAMES: Dict[int, str] = {
+    0: "No fault", 1: "Over voltage", 2: "Under voltage", 3: "Gate driver (DRV)",
+    4: "Abs. over current", 5: "Over temp FET", 6: "Over temp motor",
+    7: "Gate drv over voltage", 8: "Gate drv under voltage", 9: "MCU under voltage",
+    10: "Watchdog reset", 11: "Encoder SPI", 12: "Encoder sincos < min",
+    13: "Encoder sincos > max", 14: "Flash corruption", 15: "Offset current sens 1",
+    16: "Offset current sens 2", 17: "Offset current sens 3", 18: "Unbalanced currents",
+    19: "BRK", 20: "Resolver LOT", 21: "Resolver DOS", 22: "Resolver LOS",
+}
 
 # ── Sony VTC6 95s6p — SoC estimation ────────────────────────────────────────
 # Pack: 95s series × 6p parallel = 570 cells total
@@ -513,6 +531,38 @@ SNAPSHOT_CHANNELS: Dict[str, tuple] = {
     'gps_course_deg':       ('GPS Course',             '°'),
     'gps_sats':             ('GPS Satellites',         ''),
     'gps_has_fix':          ('GPS Fix',                '0/1'),
+    # ── IFS-09 DTI inverters (left / right) ───────────────────────────────
+    'vehicle_speed_kmh':    ('Vehicle Speed (wheels)', 'km/h'),
+    'dti_l_wheel_kmh':      ('DTI-L Wheel Speed',      'km/h'),
+    'dti_r_wheel_kmh':      ('DTI-R Wheel Speed',      'km/h'),
+    'dti_speed_delta_kmh':  ('Wheel Speed Δ (L-R)',    'km/h'),
+    'dti_l_erpm':           ('DTI-L ERPM',             'erpm'),
+    'dti_r_erpm':           ('DTI-R ERPM',             'erpm'),
+    'dti_l_duty_pct':       ('DTI-L Duty',             '%'),
+    'dti_r_duty_pct':       ('DTI-R Duty',             '%'),
+    'dti_l_vin_V':          ('DTI-L DC Input',         'V'),
+    'dti_r_vin_V':          ('DTI-R DC Input',         'V'),
+    'dti_l_ac_A':           ('DTI-L Phase Current',    'A'),
+    'dti_r_ac_A':           ('DTI-R Phase Current',    'A'),
+    'dti_l_dc_A':           ('DTI-L DC Current',       'A'),
+    'dti_r_dc_A':           ('DTI-R DC Current',       'A'),
+    'dti_dc_total_A':       ('DTI Total DC Current',   'A'),
+    'dti_l_ctrl_temp_C':    ('DTI-L Controller Temp',  'ºC'),
+    'dti_r_ctrl_temp_C':    ('DTI-R Controller Temp',  'ºC'),
+    'dti_l_motor_temp_C':   ('DTI-L Motor Temp',       'ºC'),
+    'dti_r_motor_temp_C':   ('DTI-R Motor Temp',       'ºC'),
+    'dti_l_fault':          ('DTI-L Fault Code',       ''),
+    'dti_r_fault':          ('DTI-R Fault Code',       ''),
+    # ── IFS-09 steering & IMU ─────────────────────────────────────────────
+    'lws_angle_deg':        ('Steering Angle',         'º'),
+    'lws_speed_dps':        ('Steering Rate',          'º/s'),
+    'imu_yaw_rate_rads':    ('Yaw Rate',               'rad/s'),
+    'imu_ay_mps2':          ('Lateral Accel',          'm/s²'),
+    'imu_ax_mps2':          ('Longitudinal Accel',     'm/s²'),
+    # ── Inverter (EMC) extended diagnostics ───────────────────────────────
+    'inv_torque_est_nm':    ('Torque Estimate',        'Nm'),
+    'inv_torque_max_feas':  ('Torque Max Feasible',    'Nm'),
+    'inv_ac_power_W':       ('Inverter AC Power',      'W'),
     # ── Predictive Analytics & Strategy ───────────────────────────────────
     'eff_wh_min':           ('Consumption Rate',       'Wh/min'),
     'eff_wh_km':            ('Driver Efficiency',      'Wh/km'),
@@ -618,43 +668,112 @@ class AlertBanner(QFrame):
 # ══════════════════════════════════════════════════════════════════════════════
 #  ROLLING PLOT CANVAS
 # ══════════════════════════════════════════════════════════════════════════════
-class MplCanvas(QWidget):
-    """Grafana-style rolling time-series plot embedded in a QWidget."""
-    def __init__(self, title: str = "", color: str = ISC_GREEN, parent=None):
+class FastLinePlot(QWidget):
+    """Rolling multi-series time plot optimised for live telemetry.
+
+    Performance notes (this is what removes the UI lag):
+      * lines are `animated` and redrawn by BLITTING onto a cached background, so a
+        new sample costs a few line draws instead of a full figure re-render;
+      * the full (slow) redraw only happens when the y-limits really change, on
+        resize, or on theme change;
+      * hidden plots (other tabs) only store data - they never touch the renderer.
+    """
+    def __init__(self, title: str = "", series=None, ylim=None, legend: bool = False, parent=None):
         super().__init__(parent)
-        self._color   = color
-        self._history: Deque[float] = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
+        series = series or [("", ISC_GREEN)]
+        self._color = series[0][1]
+        self._n     = HISTORY_LEN
+        self._x     = np.arange(self._n)
+        self._data  = [np.zeros(self._n) for _ in series]
+        self._fixed_ylim = ylim
+        self._cur_ylim   = None
+        self._bg    = None
+        self._dirty = False
 
         fig = Figure(figsize=(4, 2), tight_layout=True)
         fig.patch.set_facecolor(F1_PANEL_BG)
         self._ax = fig.add_subplot(111)
-        self._line, = self._ax.plot([], [], color=color, linewidth=1.4, antialiased=True)
+        self._lines = [
+            self._ax.plot(self._x, d, color=c, linewidth=1.4, antialiased=True,
+                          animated=True, label=lbl)[0]
+            for d, (lbl, c) in zip(self._data, series)
+        ]
+        self._line = self._lines[0]
         self._ax.set_facecolor(F1_DARK_BG)
-        self._ax.set_title(title, color=color, fontsize=8, fontweight='bold', pad=2)
+        self._ax.set_title(title, color=self._color, fontsize=8, fontweight='bold', pad=2)
         self._ax.tick_params(labelsize=7.5, colors='#ffffff' if F1_TEXT == '#e0e0e0' else '#111111')
         self._ax.grid(True, color='#444444' if F1_TEXT == '#e0e0e0' else '#cccccc', alpha=0.35)
         for s in self._ax.spines.values():
             s.set_color('#555555' if F1_TEXT == '#e0e0e0' else '#aaaaaa')
+        self._ax.set_xlim(0, self._n)
+        if ylim is not None:
+            self._ax.set_ylim(*ylim)
+        if legend:
+            self._ax.legend(fontsize=7, loc='upper left', facecolor=F1_PANEL_BG,
+                            labelcolor=F1_TEXT, edgecolor='#555555', framealpha=0.8)
 
-        canvas = FigureCanvas(fig)
+        self._canvas = FigureCanvas(fig)
+        self._canvas.mpl_connect('draw_event', self._on_draw)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(canvas)
-        self._canvas = canvas
+        lay.addWidget(self._canvas)
+
+    # -- blitting -------------------------------------------------------------
+    def _on_draw(self, _event=None) -> None:
+        self._bg = self._canvas.copy_from_bbox(self._ax.bbox)
+        self._draw_lines()
+
+    def _draw_lines(self) -> None:
+        for ln in self._lines:
+            self._ax.draw_artist(ln)
+
+    # -- data -----------------------------------------------------------------
+    def push(self, *values: float) -> None:
+        for arr, v in zip(self._data, values):
+            arr[:-1] = arr[1:]
+            arr[-1] = float(v)
+        self._dirty = True
+
+    def refresh(self) -> None:
+        """Repaint if there is new data and the plot is actually on screen."""
+        if not self._dirty or not self.isVisible():
+            return
+        self._dirty = False
+        need_full = self._bg is None
+        if self._fixed_ylim is None:
+            lo = min(float(a.min()) for a in self._data)
+            hi = max(float(a.max()) for a in self._data)
+            mg = max((hi - lo) * 0.1, 1.0)
+            lo, hi = lo - mg, hi + mg
+            cur = self._cur_ylim
+            # only rescale when data leaves the window or the window is >2.5x too loose
+            if cur is None or lo < cur[0] or hi > cur[1] or (hi - lo) < 0.4 * (cur[1] - cur[0]):
+                self._ax.set_ylim(lo, hi)
+                self._cur_ylim = (lo, hi)
+                need_full = True
+        for ln, arr in zip(self._lines, self._data):
+            ln.set_ydata(arr)
+        if need_full:
+            self._canvas.draw_idle()          # _on_draw re-caches bg and draws the lines
+            return
+        self._canvas.restore_region(self._bg)
+        self._draw_lines()
+        self._canvas.blit(self._ax.bbox)
+
+    def showEvent(self, ev):
+        self._bg = None                       # force a clean full redraw when shown
+        self._dirty = True
+        super().showEvent(ev)
+
+
+class MplCanvas(FastLinePlot):
+    """Grafana-style rolling time-series plot (single series)."""
+    def __init__(self, title: str = "", color: str = ISC_GREEN, parent=None):
+        super().__init__(title, [("", color)], parent=parent)
 
     def update_plot(self, value: float) -> None:
-        self._history.append(float(value))
-        y = list(self._history)
-        x = list(range(len(y)))
-        self._line.set_data(x, y)
-        for coll in self._ax.collections:
-            coll.remove()
-        self._ax.fill_between(x, y, alpha=0.10, color=self._color)
-        lo, hi = min(y), max(y)
-        mg = max((hi - lo) * 0.1, 1.0)
-        self._ax.set_xlim(0, HISTORY_LEN)
-        self._ax.set_ylim(lo - mg, hi + mg)
-        self._canvas.draw_idle()
+        self.push(value)
+        self.refresh()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -692,7 +811,8 @@ class MetricCard(QFrame):
         self.setStyleSheet(f"QFrame {{ background:{F1_PANEL_BG}; border:1px solid {color}; border-radius:3px; }}")
 
     def set_value(self, text: str) -> None:
-        self._value.setText(text)
+        if text != self._value.text():        # avoid pointless relayout/repaint
+            self._value.setText(text)
 
     def set_alert(self, active: bool) -> None:
         if active == self._alerting:
@@ -714,7 +834,10 @@ class RPMGauge(QWidget):
         self.setMinimumSize(180, 180)
 
     def set_rpm(self, rpm: float) -> None:
-        self._rpm = max(0.0, min(float(rpm), RPM_MAX))
+        new = max(0.0, min(float(rpm), RPM_MAX))
+        if int(new) == int(self._rpm):
+            return
+        self._rpm = new
         self.update()
 
     def paintEvent(self, _ev):
@@ -1017,7 +1140,7 @@ class GPSTrackWidget(QWidget):
             p.setPen(no_fix_c)
             p.setFont(QFont("Courier New", 9, QFont.Bold))
             p.drawText(map_x, map_y, map_w, map_h, Qt.AlignCenter,
-                       "NO GPS FIX\nWaiting for signal…")
+                       "NO GPS FIX\r\nWaiting for signal…")
         else:
             # ── Compute bounding box of trail for auto-zoom ─────────────────
             xs = [pt[0] for pt in self._trail]
@@ -1420,16 +1543,119 @@ class DroppablePlotPanel(QFrame):
         else:
             val = 0.0
         self._history.append(val)
-        y = list(self._history)
-        x = list(range(len(y)))
-        self._line.set_data(x, y)
-        lo, hi = min(y), max(y)
-        mg = max((hi - lo) * 0.1, 1.0)
-        self._ax.set_xlim(0, HISTORY_LEN)
-        self._ax.set_ylim(lo - mg, hi + mg)
-        self._canvas.draw_idle()
+        if self._canvas.isVisible():          # hidden tab -> keep data, skip rendering
+            y = list(self._history)
+            x = list(range(len(y)))
+            self._line.set_data(x, y)
+            lo, hi = min(y), max(y)
+            mg = max((hi - lo) * 0.1, 1.0)
+            self._ax.set_xlim(0, HISTORY_LEN)
+            self._ax.set_ylim(lo - mg, hi + mg)
+            self._canvas.draw_idle()
         unit = getattr(self, '_unit', '')
         self._val_lbl.setText(f"{val:.1f} {unit}" if unit else f"{val:.1f}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  IFS-09 WIDGETS — dual-inverter balance bars + steering wheel
+# ══════════════════════════════════════════════════════════════════════════════
+class LRBalanceWidget(QWidget):
+    """Two horizontal bars (Left / Right inverter) sharing one scale, plus the L-R delta."""
+    def __init__(self, title: str, unit: str, vmax: float, signed: bool = True, parent=None):
+        super().__init__(parent)
+        self._title, self._unit, self._vmax, self._signed = title, unit, float(vmax), signed
+        self._l = self._r = 0.0
+        self._ok = (False, False)
+        self.setMinimumHeight(74)
+
+    def set_values(self, left: float, right: float, ok_l: bool = True, ok_r: bool = True) -> None:
+        if (left, right, (ok_l, ok_r)) == (self._l, self._r, self._ok):
+            return
+        self._l, self._r, self._ok = left, right, (ok_l, ok_r)
+        self.update()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor(F1_PANEL_BG))
+        p.setPen(QColor(ISC_GREEN))
+        p.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        p.drawText(6, 13, f"{self._title}  [{self._unit}]")
+        if all(self._ok):
+            p.setPen(QColor('#888'))
+            p.drawText(w - 118, 13, f"Δ L-R = {self._l - self._r:+.1f}")
+        x0, bw = 22, max(w - 100, 40)
+        mid = x0 + (bw // 2 if self._signed else 0)
+        span = (bw / 2 if self._signed else bw)
+        for i, (lab, val, ok) in enumerate((("L", self._l, self._ok[0]), ("R", self._r, self._ok[1]))):
+            y = 22 + i * 24
+            p.setPen(QColor(F1_TEXT)); p.setFont(QFont("Segoe UI", 9, QFont.Bold))
+            p.drawText(6, y + 12, lab)
+            p.setPen(Qt.NoPen); p.setBrush(QColor('#2a2a2a'))
+            p.drawRoundedRect(x0, y, bw, 16, 3, 3)
+            if ok:
+                frac = max(-1.0, min(1.0, val / self._vmax if self._vmax else 0.0))
+                col = QColor(ISC_GREEN if val >= 0 else F1_PURPLE)
+                if abs(frac) > 0.9:
+                    col = QColor(F1_ERROR)
+                p.setBrush(col)
+                length = int(abs(frac) * span)
+                if val >= 0:
+                    p.drawRoundedRect(mid, y, length, 16, 3, 3)
+                else:
+                    p.drawRoundedRect(mid - length, y, length, 16, 3, 3)
+            p.setPen(QColor('#ddd' if ok else '#555')); p.setFont(QFont("Courier New", 9, QFont.Bold))
+            p.drawText(x0 + bw + 6, y + 13, f"{val:+.1f}" if ok else "—")
+        if self._signed:
+            p.setPen(QPen(QColor('#666'), 1)); p.drawLine(mid, 20, mid, 70)
+        p.end()
+
+
+class SteeringWheelWidget(QWidget):
+    """Top-down steering wheel that rotates with the Bosch LWS angle (+ = left / CCW)."""
+    RANGE_DEG = 270.0
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._angle = 0.0
+        self._valid = False
+        self.setMinimumSize(170, 170)
+
+    def set_angle(self, deg: float, valid: bool = True) -> None:
+        if abs(deg - self._angle) < 0.05 and valid == self._valid:
+            return
+        self._angle, self._valid = float(deg), bool(valid)
+        self.update()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        side = min(w, h) - 18
+        cx, cy, r = w // 2, h // 2 - 4, side // 2
+        p.fillRect(0, 0, w, h, QColor(F1_PANEL_BG))
+        col = QColor(ISC_GREEN if self._valid else '#555')
+        if self._valid and abs(self._angle) > self.RANGE_DEG:
+            col = QColor(F1_WARNING)
+        p.save()
+        p.translate(cx, cy)
+        p.rotate(-self._angle)                # positive angle = left = counter-clockwise
+        p.setPen(QPen(col, max(6, r // 9), Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(-r, -r, 2 * r, 2 * r)
+        p.setPen(QPen(col, max(5, r // 11), Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(-r, 0, r, 0)               # horizontal spoke
+        p.drawLine(0, 0, 0, r)                # bottom spoke
+        p.setPen(QPen(QColor(F1_ERROR), 4, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(0, -r, 0, -r + max(10, r // 5))   # 12 o'clock marker
+        p.restore()
+        p.setPen(QColor(F1_TEXT if self._valid else '#555'))
+        p.setFont(QFont("Arial", 11, QFont.Bold))
+        side_txt = "" if abs(self._angle) < 1 else (" ◄" if self._angle > 0 else " ►")
+        txt = f"{self._angle:+.1f}°{side_txt}" if self._valid else "NO LWS"
+        p.drawText(0, h - 18, w, 16, Qt.AlignCenter, txt)
+        p.end()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1863,16 +2089,16 @@ class BrakeCalibrationWizard(QDialog):
 
     STEPS = [
         ("Step 1/3 - Release All Pedals",
-         "Fully release BOTH pedals and hold them at rest.\n"
+         "Fully release BOTH pedals and hold them at rest.\r\n"
          "Click 'Start Sampling' - the wizard records resting ADC values for 3 seconds."),
         ("Step 2/3 - Press Throttle to the Floor",
-         "Keep the brake released. Press the throttle pedal fully to the floor and hold.\n"
+         "Keep the brake released. Press the throttle pedal fully to the floor and hold.\r\n"
          "Click 'Start Sampling' to record APPS1 and APPS2 maximum values."),
         ("Step 3/3 - Press Brake to the Floor",
-         "Release the throttle. Press the brake pedal fully to the floor and hold.\n"
+         "Release the throttle. Press the brake pedal fully to the floor and hold.\r\n"
          "Click 'Start Sampling' to record the brake maximum ADC value."),
         ("Calibration Complete - Review & Save",
-         "These values will replace the hardcoded defaults.\n"
+         "These values will replace the hardcoded defaults.\r\n"
          "Click 'Save & Apply' to use them, or Cancel to discard."),
     ]
 
@@ -2040,8 +2266,8 @@ class BrakeCalibrationWizard(QDialog):
         if self._step == 3:
             c = self.result_cal
             self._lbl_result.setText(
-                f"APPS1:  {c.get('apps1_min','?')} -> {c.get('apps1_max','?')}\n"
-                f"APPS2:  {c.get('apps2_min','?')} -> {c.get('apps2_max','?')}\n"
+                f"APPS1:  {c.get('apps1_min','?')} -> {c.get('apps1_max','?')}\r\n"
+                f"APPS2:  {c.get('apps2_min','?')} -> {c.get('apps2_max','?')}\r\n"
                 f"Brake:  {c.get('brk_min','?')} -> {c.get('brk_max','?')}")
             self._lbl_result.show()
 
@@ -2081,7 +2307,7 @@ def _sd_open_cal_wizard(self):
     elif not port:
         from PyQt5.QtWidgets import QMessageBox
         QMessageBox.warning(self, "No COM Port",
-            "No COM port is selected.\n"
+            "No COM port is selected.\r\n"
             "Select a port in Settings and try again, or start reception first.")
         return
 
@@ -2119,7 +2345,7 @@ def _sd_on_marple_toggled(self, state: int):
         QMessageBox.warning(
             self,
             "Access Denied",
-            "Incorrect password.\nMarple cloud upload has not been enabled.",
+            "Incorrect password.\r\nMarple cloud upload has not been enabled.",
         )
         self.chk_marple.blockSignals(True)
         self.chk_marple.setChecked(False)
@@ -2347,7 +2573,7 @@ class PostRaceWindow(QWidget):
 
         # Description
         desc = QLabel(
-            "Select the NMEA 0183 log file recorded by the on-board GPS module\n"
+            "Select the NMEA 0183 log file recorded by the on-board GPS module\r\n"
             "(MTK3339 micro-SD logger). Accepted formats: .nmea, .txt, .log, .csv")
         desc.setStyleSheet(f"color:{F1_TEXT}; font-size:9px;")
         desc.setWordWrap(True)
@@ -2416,7 +2642,7 @@ class PostRaceWindow(QWidget):
 
         # Description
         desc = QLabel(
-            "Select the AMS temperature log file from the micro-SD card.\n"
+            "Select the AMS temperature log file from the micro-SD card.\r\n"
             "When merged, adds 95 columns (ams_t_mod{m}_cell{c}) to the session CSV.")
         desc.setStyleSheet(f"color:{F1_TEXT}; font-size:9px;")
         desc.setWordWrap(True)
@@ -2600,7 +2826,7 @@ class PostRaceWindow(QWidget):
                 if ok:
                     self._session_path = new_path
                     merged_any = True
-                    gps_msg = f"GPS: {msg}\n"
+                    gps_msg = f"GPS: {msg}\r\n"
                     self._log_append(f"[AUTO-MERGE] GPS integrated: {msg}")
                 else:
                     self._log_append(f"[AUTO-MERGE] GPS failed: {msg}")
@@ -2611,7 +2837,7 @@ class PostRaceWindow(QWidget):
                 if ok:
                     self._session_path = new_path
                     merged_any = True
-                    ams_msg = f"AMS: {msg}\n"
+                    ams_msg = f"AMS: {msg}\r\n"
                     self._log_append(f"[AUTO-MERGE] AMS integrated: {msg}")
                 else:
                     self._log_append(f"[AUTO-MERGE] AMS failed: {msg}")
@@ -2619,7 +2845,7 @@ class PostRaceWindow(QWidget):
             if merged_any:
                 QMessageBox.information(
                     self, "Post-Race Integration Complete",
-                    f"Selected files have been integrated into: {self._session_path.name}\n\n"
+                    f"Selected files have been integrated into: {self._session_path.name}\r\n\r\n"
                     f"{gps_msg}{ams_msg}")
         event.accept()
 
@@ -2640,6 +2866,8 @@ class MainWindow(QMainWindow):
         self.demo_mode    = self.settings["demo_mode"]
         self.is_receiving = False
         self.rx_thread: Optional[threading.Thread] = None
+        self._ui_version = -1          # last rtt.data_version rendered
+        self._force_refresh = True     # redraw once on tab switch / start
         self._post_race_win: Optional["PostRaceWindow"] = None
         self._settings_dlg: Optional[SettingsDialog]    = None
 
@@ -2653,7 +2881,7 @@ class MainWindow(QMainWindow):
 
         self._timer = QTimer()
         self._timer.timeout.connect(self._update)
-        self._timer.start(400)
+        self._timer.start(100)    # 10 Hz UI tick; heavy work only when a NEW snapshot arrived
 
         signaler.log_message.connect(self._log_append)
         signaler.update_detected.connect(self._show_update_banner)
@@ -2808,7 +3036,7 @@ class MainWindow(QMainWindow):
         if result.startswith("ERR:"):
             err_msg = result[4:]
             QMessageBox.critical(self, "Error de descarga", 
-                                 f"No se pudo descargar la actualización automáticamente:\n{err_msg}\n\nPor favor, inténtelo de nuevo o instálela desde la web.")
+                                 f"No se pudo descargar la actualización automáticamente:\r\n{err_msg}\r\n\r\nPor favor, inténtelo de nuevo o instálela desde la web.")
             webbrowser.open(_RELEASES_PAGE)
         else:
             self._log_append(f"[UPDATE] Descarga de actualización completada. Iniciando instalador: {result}")
@@ -2820,7 +3048,7 @@ class MainWindow(QMainWindow):
                 self.close()
             except Exception as install_err:
                 QMessageBox.critical(self, "Error de instalación", 
-                                     f"No se pudo iniciar el instalador descargado:\n{install_err}\n\nUbicación del archivo: {result}")
+                                     f"No se pudo iniciar el instalador descargado:\r\n{install_err}\r\n\r\nUbicación del archivo: {result}")
 
     def _dismiss_update_banner(self):
         if hasattr(self, "_update_banner") and self._update_banner:
@@ -2910,9 +3138,15 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._tabs.setFont(QFont("Segoe UI", 10, QFont.Bold))
         self._tabs.addTab(self._tab_overview(),   "Overview")
-        self._tabs.addTab(self._tab_customize(),  "Customize")
-        self._tabs.addTab(self._tab_powertrain(), "Powertrain")
-        self._tabs.addTab(self._tab_dynamics(),   "Dynamics")
+        self._tab_cust_w = self._tab_customize()
+        self._tabs.addTab(self._tab_cust_w,       "Customize")
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._tab_pt_w = self._tab_powertrain()
+        self._tabs.addTab(self._tab_pt_w, "Powertrain")
+        self._tab_ifs09_w = self._tab_ifs09()
+        self._tabs.addTab(self._tab_ifs09_w, "IFS-09 Drivetrain")
+        self._tab_dyn_w = self._tab_dynamics()
+        self._tabs.addTab(self._tab_dyn_w,        "Dynamics")
         self._tabs.addTab(self._tab_post_race(),  "Post-Race")
         vbox.addWidget(self._tabs, stretch=10)
 
@@ -3011,7 +3245,13 @@ class MainWindow(QMainWindow):
         self._btn_theme = QPushButton("☀️  Light" if self.theme_mode == "dark" else "🌙  Dark")
         self._btn_theme.setStyleSheet(self.get_button_style())
         self._btn_theme.clicked.connect(self._toggle_theme)
-        bg.addWidget(self._btn_theme, 2, 0, 1, 2)
+        bg.addWidget(self._btn_theme, 2, 0)
+
+        self._btn_marple = QPushButton("Marple ↑")
+        self._btn_marple.setToolTip("Export a session CSV to Marple DB")
+        self._btn_marple.setStyleSheet(self.get_button_style())
+        self._btn_marple.clicked.connect(self._export_to_marple)
+        bg.addWidget(self._btn_marple, 2, 1)
 
         h.addLayout(bg)
         return bar
@@ -3044,29 +3284,14 @@ class MainWindow(QMainWindow):
         self._ov_plot_vbus = MplCanvas("DC Bus Voltage  [V]",     F1_WARNING)
         self._ov_plot_temp = MplCanvas("Max Battery Temp  [ºC]",F1_ERROR)
 
-        # Throttle + Brake dual-line canvas
-        self._ov_thr_hist: Deque[float] = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
-        self._ov_brk_hist: Deque[float] = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
-        fig_tb = Figure(figsize=(4, 2), tight_layout=True)
-        fig_tb.patch.set_facecolor(F1_PANEL_BG)
-        self._ax_tb = fig_tb.add_subplot(111)
-        self._line_thr, = self._ax_tb.plot([], [], color=ISC_GREEN,  linewidth=1.4, label='Throttle [%]')
-        self._line_brk, = self._ax_tb.plot([], [], color=F1_ERROR,   linewidth=1.4, label='Brake [%]')
-        self._ax_tb.set_facecolor(F1_DARK_BG)
-        self._ax_tb.set_title('Throttle / Brake  [%]', color=F1_WARNING,
-                               fontsize=8, fontweight='bold', pad=2)
-        self._ax_tb.set_ylim(-5, 105)
-        self._ax_tb.set_xlim(0, HISTORY_LEN)
-        self._ax_tb.tick_params(labelsize=7.5, colors='#ffffff' if F1_TEXT == '#e0e0e0' else '#111111')
-        self._ax_tb.grid(True, color='#444444' if F1_TEXT == '#e0e0e0' else '#cccccc', alpha=0.35)
-        self._ax_tb.legend(fontsize=7, loc='upper left',
-                           facecolor=F1_PANEL_BG, labelcolor=F1_TEXT,
-                           edgecolor='#555555' if F1_TEXT == '#e0e0e0' else '#aaaaaa', framealpha=0.8)
-        for sp in self._ax_tb.spines.values(): sp.set_color('#555555' if F1_TEXT == '#e0e0e0' else '#aaaaaa')
-        self._canvas_tb = FigureCanvas(fig_tb)
-        tb_widget = QWidget()
-        tb_lay = QVBoxLayout(tb_widget); tb_lay.setContentsMargins(0,0,0,0)
-        tb_lay.addWidget(self._canvas_tb)
+        # Throttle + Brake dual-line canvas (blitted)
+        self._tb_plot = FastLinePlot('Throttle / Brake  [%]',
+                                     [('Throttle [%]', ISC_GREEN), ('Brake [%]', F1_ERROR)],
+                                     ylim=(-5, 105), legend=True)
+        self._tb_plot._ax.title.set_color(F1_WARNING)
+        self._ax_tb     = self._tb_plot._ax
+        self._canvas_tb = self._tb_plot._canvas
+        tb_widget = self._tb_plot
 
         pr.addWidget(self._ov_plot_rpm)
         pr.addWidget(self._ov_plot_vbus)
@@ -3227,6 +3452,139 @@ class MainWindow(QMainWindow):
         v.addLayout(bot, stretch=3)
         return w
 
+    # ── Tab — IFS-09 Drivetrain (dual DTI inverters + LWS + IMU) ─────────────
+    def _dti_group(self, side: str, title: str) -> QGroupBox:
+        box = QGroupBox(title)
+        g = QGridLayout(box); g.setSpacing(6)
+        cards = {
+            'speed': MetricCard("Wheel Speed",   "km/h", ISC_GREEN),
+            'erpm':  MetricCard("ERPM",          "erpm", ISC_GREEN),
+            'duty':  MetricCard("Duty",          "%",    F1_BLUE),
+            'vin':   MetricCard("DC Input",      "V",    ISC_GREEN),
+            'ac':    MetricCard("Phase Current", "A",    F1_PURPLE),
+            'dc':    MetricCard("DC Current",    "A",    F1_PURPLE),
+            'ctrl':  MetricCard("Controller T",  "ºC",   F1_WARNING),
+            'motor': MetricCard("Motor T",       "ºC",   F1_WARNING),
+            'fault': MetricCard("Fault",         "",     F1_ERROR),
+            'state': MetricCard("Status",        "",     ISC_GREEN),
+        }
+        order = ['speed', 'erpm', 'duty', 'vin', 'ac', 'dc', 'ctrl', 'motor']
+        for i, k in enumerate(order):
+            g.addWidget(cards[k], i // 2, i % 2)
+        g.addWidget(cards['fault'], 4, 0)
+        g.addWidget(cards['state'], 4, 1)
+        setattr(self, f'_dti_{side}', cards)
+        return box
+
+    def _tab_ifs09(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w); v.setSpacing(6); v.setContentsMargins(8, 8, 8, 8)
+
+        top = QHBoxLayout(); top.setSpacing(8)
+        top.addWidget(self._dti_group('l', "LEFT INVERTER  (DTI-L)"), stretch=3)
+
+        # Centre: steering + IMU + L/R balance
+        mid = QVBoxLayout(); mid.setSpacing(6)
+        sbox = QGroupBox("STEERING  (Bosch LWS)")
+        sv = QVBoxLayout(sbox)
+        self._ifs_wheel = SteeringWheelWidget()
+        sv.addWidget(self._ifs_wheel)
+        sh = QHBoxLayout()
+        self._ifs_lws_rate = MetricCard("Steering Rate", "º/s", ISC_GREEN)
+        self._ifs_lws_stat = MetricCard("LWS Status", "", ISC_GREEN)
+        sh.addWidget(self._ifs_lws_rate); sh.addWidget(self._ifs_lws_stat)
+        sv.addLayout(sh)
+        mid.addWidget(sbox, stretch=3)
+
+        ibox = QGroupBox("IMU  (Xsens)")
+        iv = QGridLayout(ibox)
+        self._ifs_yaw  = MetricCard("Yaw Rate",   "º/s",  F1_BLUE)
+        self._ifs_ay   = MetricCard("Lateral",    "m/s²", F1_PURPLE)
+        self._ifs_ax   = MetricCard("Longitudinal", "m/s²", F1_PURPLE)
+        self._ifs_imu  = MetricCard("IMU Status", "",     ISC_GREEN)
+        iv.addWidget(self._ifs_yaw, 0, 0); iv.addWidget(self._ifs_imu, 0, 1)
+        iv.addWidget(self._ifs_ay,  1, 0); iv.addWidget(self._ifs_ax,  1, 1)
+        mid.addWidget(ibox, stretch=2)
+        top.addLayout(mid, stretch=3)
+
+        top.addWidget(self._dti_group('r', "RIGHT INVERTER  (DTI-R)"), stretch=3)
+        v.addLayout(top, stretch=5)
+
+        # L/R balance bars
+        bal = QHBoxLayout(); bal.setSpacing(8)
+        self._bal_speed = LRBalanceWidget("Wheel speed",   "km/h", DTI_SPEED_MAX_KMH, signed=True)
+        self._bal_ac    = LRBalanceWidget("Phase current", "A",    DTI_AC_MAX_A,      signed=True)
+        self._bal_temp  = LRBalanceWidget("Motor temp",    "ºC",   DTI_MOTOR_TEMP_WARN_C, signed=False)
+        for b in (self._bal_speed, self._bal_ac, self._bal_temp):
+            bal.addWidget(b)
+        v.addLayout(bal, stretch=1)
+
+        # Live plots (blitted)
+        pr = QHBoxLayout(); pr.setSpacing(6)
+        self._ifs_plot_speed = FastLinePlot("Wheel speed  L / R  [km/h]",
+                                            [("L", ISC_GREEN), ("R", F1_BLUE)], legend=True)
+        self._ifs_plot_ac    = FastLinePlot("Phase current  L / R  [A]",
+                                            [("L", F1_PURPLE), ("R", F1_WARNING)], legend=True)
+        self._ifs_plot_steer = FastLinePlot("Steering [º]  /  Yaw rate [º/s]",
+                                            [("Steer", ISC_GREEN), ("Yaw", F1_ERROR)], legend=True)
+        self._ifs_plot_temp  = FastLinePlot("Temperatures  [ºC]",
+                                            [("Ctrl L", F1_WARNING), ("Ctrl R", F1_ERROR),
+                                             ("Mot L", F1_BLUE), ("Mot R", F1_PURPLE)], legend=True)
+        for pl in (self._ifs_plot_speed, self._ifs_plot_ac, self._ifs_plot_steer, self._ifs_plot_temp):
+            pr.addWidget(pl)
+        v.addLayout(pr, stretch=5)
+        return w
+
+    def _update_ifs09(self, s: dict) -> None:
+        pushes = {}
+        for side in ('l', 'r'):
+            c = getattr(self, f'_dti_{side}')
+            ok = bool(s.get(f'dti_{side}_valid', 0))
+            k = lambda name, side=side: s.get(f'dti_{side}_{name}', 0)
+            fmt = lambda txt, ok=ok: txt if ok else "—"
+            c['speed'].set_value(fmt(f"{k('wheel_kmh'):.1f}"))
+            c['erpm'].set_value(fmt(f"{int(k('erpm')):,}"))
+            c['duty'].set_value(fmt(f"{k('duty_pct'):+.1f}"))
+            c['vin'].set_value(fmt(f"{k('vin_V'):.1f}"))
+            c['ac'].set_value(fmt(f"{k('ac_A'):+.1f}"))
+            c['dc'].set_value(fmt(f"{k('dc_A'):+.1f}"))
+            c['ctrl'].set_value(fmt(f"{k('ctrl_temp_C'):.1f}"))
+            c['motor'].set_value(fmt(f"{k('motor_temp_C'):.1f}"))
+            flt = int(k('fault'))
+            c['fault'].set_value(fmt("0 · OK" if flt == 0 else f"{flt} · {DTI_FAULT_NAMES.get(flt, '?')}"))
+            c['fault'].set_alert(ok and flt != 0)
+            c['ctrl'].set_alert(ok and k('ctrl_temp_C') > DTI_CTRL_TEMP_WARN_C)
+            c['motor'].set_alert(ok and k('motor_temp_C') > DTI_MOTOR_TEMP_WARN_C)
+            if not ok:
+                c['state'].set_value("NO DATA")
+            else:
+                c['state'].set_value("DRIVE ON" if k('drive_en') else "STANDBY")
+            pushes[side] = (ok, k('wheel_kmh'), k('ac_A'), k('ctrl_temp_C'), k('motor_temp_C'))
+
+        okl, ok_r = pushes['l'][0], pushes['r'][0]
+        self._bal_speed.set_values(pushes['l'][1], pushes['r'][1], okl, ok_r)
+        self._bal_ac.set_values(pushes['l'][2], pushes['r'][2], okl, ok_r)
+        self._bal_temp.set_values(pushes['l'][4], pushes['r'][4], okl, ok_r)
+
+        # Steering + IMU
+        lws_ok = bool(s.get('lws_valid', 0))
+        self._ifs_wheel.set_angle(s.get('lws_angle_deg', 0.0), lws_ok)
+        self._ifs_lws_rate.set_value(f"{s.get('lws_speed_dps', 0.0):+.0f}" if lws_ok else "—")
+        self._ifs_lws_stat.set_value(f"0x{int(s.get('lws_status', 0)):02X}" if lws_ok else "NO DATA")
+        imu_ok = bool(s.get('imu_valid', 0))
+        self._ifs_yaw.set_value(f"{s.get('imu_gz_dps', 0.0):+.1f}" if imu_ok else "—")
+        self._ifs_ay.set_value(f"{s.get('imu_ay_mps2', 0.0):+.2f}" if imu_ok else "—")
+        self._ifs_ax.set_value(f"{s.get('imu_ax_mps2', 0.0):+.2f}" if imu_ok else "—")
+        self._ifs_imu.set_value("OK" if imu_ok else "NO DATA")
+
+        # Plots: push data, blit only if the tab is showing
+        self._ifs_plot_speed.push(pushes['l'][1], pushes['r'][1])
+        self._ifs_plot_ac.push(pushes['l'][2], pushes['r'][2])
+        self._ifs_plot_steer.push(s.get('lws_angle_deg', 0.0), s.get('imu_gz_dps', 0.0))
+        self._ifs_plot_temp.push(pushes['l'][3], pushes['r'][3], pushes['l'][4], pushes['r'][4])
+        for pl in (self._ifs_plot_speed, self._ifs_plot_ac, self._ifs_plot_steer, self._ifs_plot_temp):
+            pl.refresh()
+
     # ── Tab 4 — Dynamics ──────────────────────────────────────────────────────
     def _tab_dynamics(self) -> QWidget:
         w = QWidget()
@@ -3267,7 +3625,7 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color:{ISC_GREEN}; font-size:11px; font-family:'Courier New';")
             gv.addWidget(l)
         gv.addStretch()
-        note = QLabel("IMU channels not yet in\nradio snapshot — placeholder.")
+        note = QLabel("IMU channels not yet in\r\nradio snapshot — placeholder.")
         note.setStyleSheet("color:#333; font-size:9px;")
         gv.addWidget(note)
         h.addWidget(gbox, stretch=1)
@@ -3343,7 +3701,9 @@ class MainWindow(QMainWindow):
     # ── Data access ───────────────────────────────────────────────────────────
     @staticmethod
     def _snap() -> dict:
-        return rtt.get_latest_data().get('snapshot', {})
+        # Shallow copy: the RX thread publishes immutable-by-convention dicts and the UI
+        # adds its own derived keys (analytics) to this private copy.
+        return dict(rtt.get_snapshot())
 
     # ── Alert checking ────────────────────────────────────────────────────────
     # ── Fault History Log ──────────────────────────────────────────────────────
@@ -3435,19 +3795,43 @@ class MainWindow(QMainWindow):
             a1_pct = max(0.0, min(100.0, (apps1 - APPS1_MIN) / _a1_span * 100.0))
             a2_pct = max(0.0, min(100.0, (apps2 - APPS2_MIN) / _a2_span * 100.0))
             apps_diff = abs(a1_pct - a2_pct)
+            # Count RADIO FRAMES (not UI ticks): the UI timer now runs faster than the radio.
+            _new_frame = rtt.data_version != getattr(self, '_apps_ver', -1)
+            self._apps_ver = rtt.data_version
             if apps_diff > 10.0:
-                self._apps_impl_count = getattr(self, '_apps_impl_count', 0) + 1
-                if self._apps_impl_count >= 3:  # 3 consecutive frames (~300 ms)
+                if _new_frame:
+                    self._apps_impl_count = getattr(self, '_apps_impl_count', 0) + 1
+                if getattr(self, '_apps_impl_count', 0) >= 3:  # 3 consecutive frames
                     alerts.append((
                         f"APPS IMPLAUSIBILITY: A1={a1_pct:.0f}%  A2={a2_pct:.0f}%  "
                         f"(diff {apps_diff:.0f}%) — CHECK PEDAL SENSORS",
                         'critical'))
-                    if self._apps_impl_count == 3:  # Log only on first trigger
+                    if self._apps_impl_count == 3 and _new_frame:  # Log only on first trigger
                         self._log_fault_event(
                             s.get('dem_code', 0), s.get('inv_error', 0),
                             'APPS_IMPL', f"A1={a1_pct:.0f}% A2={a2_pct:.0f}% diff={apps_diff:.1f}%")
             else:
                 self._apps_impl_count = 0
+
+        # ── IFS-09: DTI inverters, steering sensor, IMU ──────────────────────
+        if s.get('inv_dc_bus_V', 0) > 200 or s.get('dti_l_vin_V', 0) > 200:
+            for side, name in (('l', 'LEFT'), ('r', 'RIGHT')):
+                if not s.get(f'dti_{side}_valid', 0):
+                    alerts.append((f"DTI {name} NO DATA (CAN timeout)", 'critical'))
+                    continue
+                flt = int(s.get(f'dti_{side}_fault', 0))
+                if flt:
+                    alerts.append((f"DTI {name} FAULT {flt}: {DTI_FAULT_NAMES.get(flt, 'unknown')}", 'critical'))
+                ct = s.get(f'dti_{side}_ctrl_temp_C', 0.0)
+                mt = s.get(f'dti_{side}_motor_temp_C', 0.0)
+                if ct > DTI_CTRL_TEMP_WARN_C:
+                    alerts.append((f"DTI {name} CTRL TEMP {ct:.0f} ºC", 'warning'))
+                if mt > DTI_MOTOR_TEMP_WARN_C:
+                    alerts.append((f"MOTOR {name} TEMP {mt:.0f} ºC", 'critical'))
+            if s and not s.get('lws_valid', 1):
+                alerts.append(("STEERING SENSOR (LWS) NO DATA", 'warning'))
+            if s and not s.get('imu_valid', 1):
+                alerts.append(("IMU NO DATA", 'warning'))
 
         # ── DEM fault change detection (for fault history log) ────────────────
         dem_now = int(s.get('dem_code', 0))
@@ -3470,22 +3854,45 @@ class MainWindow(QMainWindow):
             self._process_tts_alerts(alerts)
 
     # ── Main update loop ──────────────────────────────────────────────────────
+    def _on_tab_changed(self, _idx: int) -> None:
+        self._force_refresh = True
+        QTimer.singleShot(0, self._update)
+
     def _update(self):
-        snap = self._snap()
-        self._check_alerts(snap)
+        """UI tick. RX runs in its own thread and publishes immutable snapshots; here we
+        only render. Work is skipped unless a NEW snapshot arrived (or the tab changed),
+        and only the visible tab is updated."""
         self._update_badge()
-        self._update_overview(snap)
-        self._update_powertrain(snap)
-        self._update_dynamics(snap)
-        self._update_customize(snap)
-        # Log new data strings
-        if rtt.new_data_flag == 1:
-            self._log_append(rtt.data_str)
-            rtt.new_data_flag = 0
+        snap = self._snap()
+        self._check_alerts(snap)      # cheap; also reports link-loss with no new data
         # Detect dead RX thread
         if self.is_receiving and not self.demo_mode:
             if self.rx_thread and not self.rx_thread.is_alive():
                 self._stop()
+
+        ver = rtt.data_version
+        if ver == self._ui_version and not self._force_refresh:
+            return
+        self._ui_version = ver
+        self._force_refresh = False
+
+        self._update_overview(snap)   # always: feeds SoC latch / analytics / mini labels
+        cur = self._tabs.currentWidget()
+        if cur is self._tab_pt_w:
+            self._update_powertrain(snap)
+        elif cur is self._tab_ifs09_w:
+            self._update_ifs09(snap)
+        elif cur is self._tab_dyn_w:
+            self._update_dynamics(snap)
+        elif cur is self._tab_cust_w:
+            self._update_customize(snap)
+        # Customize panels keep collecting history while hidden (cheap, no rendering)
+        if cur is not self._tab_cust_w:
+            self._update_customize(snap)
+        # Log new data strings
+        if rtt.new_data_flag == 1:
+            self._log_append(rtt.data_str)
+            rtt.new_data_flag = 0
 
     def _update_badge(self):
         st    = rtt.get_latest_data().get("__STATUS__", {})
@@ -3672,13 +4079,8 @@ class MainWindow(QMainWindow):
         a2_norm = max(0.0, min(1.0, (a2 - APPS2_MIN) / (APPS2_MAX - APPS2_MIN))) if APPS2_MAX > APPS2_MIN else 0.0
         thr_pct = max(a1_norm, a2_norm) * 100.0
         brk_pct = max(0.0, min(100.0, (brk - BRK_MIN) / max(BRK_MAX - BRK_MIN, 1) * 100.0))
-        self._ov_thr_hist.append(thr_pct)
-        self._ov_brk_hist.append(brk_pct)
-        xt  = list(range(HISTORY_LEN))
-        self._line_thr.set_data(xt, list(self._ov_thr_hist))
-        self._line_brk.set_data(xt, list(self._ov_brk_hist))
-        self._ax_tb.set_xlim(0, HISTORY_LEN)
-        self._canvas_tb.draw_idle()
+        self._tb_plot.push(thr_pct, brk_pct)
+        self._tb_plot.refresh()
 
         def _ind(lbl, text, on):
             lbl.setText(f"● {text}")
@@ -3895,6 +4297,7 @@ class MainWindow(QMainWindow):
             self.rx_thread.start()
 
         self.is_receiving = True
+        self._force_refresh = True
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._btn_settings.setEnabled(False)
@@ -3925,6 +4328,30 @@ class MainWindow(QMainWindow):
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._btn_settings.setEnabled(True)
+
+    def _export_to_marple(self):
+        """Manual export of a session CSV to Marple DB (same password gate as the settings toggle)."""
+        if not isc_marple.is_configured():
+            QMessageBox.warning(self, "Marple", "Marple is not configured.\r\nCreate isc_realtime_26/.env with "
+                                "MARPLE_API_TOKEN (see .env.example) and make sure `marpledata` is installed.")
+            return
+        pwd, ok = QInputDialog.getText(self, "Marple Upload — Authentication Required",
+                                       "Enter the Marple API password:", QLineEdit.Password)
+        if not ok:
+            return
+        if hashlib.sha256(pwd.encode()).hexdigest() != _MARPLE_PASSWORD_HASH:
+            QMessageBox.warning(self, "Access Denied", "Incorrect password. Nothing was uploaded.")
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Session CSV to export", str(rtt.LOG_DIR), "CSV (*.csv)")
+        if not path:
+            return
+        meta = {"piloto": self._inp_pilot.text(), "circuito": self._inp_circuit.text(),
+                "type": "Real_Telemetry", "date": datetime.now().isoformat()}
+        self._log_append(f"[MARPLE] Uploading {Path(path).name} in background…")
+        isc_marple.upload_session_csv_async(
+            path, meta,
+            on_done=lambda ok, name: signaler.log_message.emit(
+                f"[MARPLE] {'Upload OK' if ok else 'Upload FAILED'}: {name}"))
 
     def _open_settings(self):
         self._settings_dlg = SettingsDialog(self)
@@ -4206,7 +4633,7 @@ class MainWindow(QMainWindow):
                 w._title.setStyleSheet(f"color:{col}; font-size:9px; font-weight:bold; background:transparent; border:none;")
                 w.update()
 
-            elif isinstance(w, MplCanvas):
+            elif isinstance(w, FastLinePlot):
                 w._ax.set_facecolor(F1_PANEL_BG)
                 w._canvas.figure.patch.set_facecolor(F1_PANEL_BG)
                 w._ax.tick_params(labelsize=7.5, colors=txt_col)
@@ -4642,10 +5069,10 @@ class MainWindow(QMainWindow):
                 return
             self._pr_progress.setValue(100)
             self._pr_lbl_status.setText(f"Success! Saved to {Path(result).name}")
-            self._show_custom_msgbox("Extraction Complete", f"File downloaded successfully to:\n\n{result}", is_error=False)
+            self._show_custom_msgbox("Extraction Complete", f"File downloaded successfully to:\r\n\r\n{result}", is_error=False)
         else:
             self._pr_lbl_status.setText(f"Error: {result}")
-            self._show_custom_msgbox("Extraction Error", f"Extraction failed:\n\n{result}", is_error=True)
+            self._show_custom_msgbox("Extraction Error", f"Extraction failed:\r\n\r\n{result}", is_error=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5042,16 +5469,16 @@ class AMSSimulatorThread(QThread):
                 "content": (
                     "tick_ms,fsm,mode,ams_ok,fault,detail,tsms,dash_chg,mod_mask,pack_mV,I_raw_mA,I_filt_mA,Idcdc_mA,dcbus_V,vmin_mV,vmax_mV,tmin_C,tmax_C,tavg_C,"
                     + ",".join(f"c0_{i}" for i in range(19)) + "," + ",".join(f"c1_{i}" for i in range(19)) + "," + ",".join(f"c2_{i}" for i in range(19)) + "," + ",".join(f"c3_{i}" for i in range(19)) + "," + ",".join(f"c4_{i}" for i in range(19)) + ","
-                    + ",".join(f"t0_{i}" for i in range(40)) + "," + ",".join(f"t1_{i}" for i in range(40)) + "," + ",".join(f"t2_{i}" for i in range(40)) + "," + ",".join(f"t3_{i}" for i in range(40)) + "," + ",".join(f"t4_{i}" for i in range(40)) + "\n"
+                    + ",".join(f"t0_{i}" for i in range(40)) + "," + ",".join(f"t1_{i}" for i in range(40)) + "," + ",".join(f"t2_{i}" for i in range(40)) + "," + ",".join(f"t3_{i}" for i in range(40)) + "," + ",".join(f"t4_{i}" for i in range(40)) + "\r\n"
                     + "1000,2,1,1,0,0,1,0,31,380000,-15000,-14800,2000,380,3850,3950,25,28,26,"
                     + ",".join("3900" for _ in range(95)) + ","
-                    + ",".join("26" for _ in range(200)) + "\n"
+                    + ",".join("26" for _ in range(200)) + "\r\n"
                     + "1250,2,1,1,0,0,1,0,31,380100,-14800,-14700,2010,380,3860,3960,25,28,26,"
                     + ",".join("3910" for _ in range(95)) + ","
-                    + ",".join("26" for _ in range(200)) + "\n"
+                    + ",".join("26" for _ in range(200)) + "\r\n"
                     + "1500,2,1,1,0,0,1,0,31,380200,-14500,-14600,1990,380,3870,3970,25,28,26,"
                     + ",".join("3920" for _ in range(95)) + ","
-                    + ",".join("26" for _ in range(200)) + "\n"
+                    + ",".join("26" for _ in range(200)) + "\r\n"
                 ).encode('utf-8')
             },
             2: {
@@ -5059,13 +5486,13 @@ class AMSSimulatorThread(QThread):
                 "content": (
                     "tick_ms,fsm,mode,ams_ok,fault,detail,tsms,dash_chg,mod_mask,pack_mV,I_raw_mA,I_filt_mA,Idcdc_mA,dcbus_V,vmin_mV,vmax_mV,tmin_C,tmax_C,tavg_C,"
                     + ",".join(f"c0_{i}" for i in range(19)) + "," + ",".join(f"c1_{i}" for i in range(19)) + "," + ",".join(f"c2_{i}" for i in range(19)) + "," + ",".join(f"c3_{i}" for i in range(19)) + "," + ",".join(f"c4_{i}" for i in range(19)) + ","
-                    + ",".join(f"t0_{i}" for i in range(40)) + "," + ",".join(f"t1_{i}" for i in range(40)) + "," + ",".join(f"t2_{i}" for i in range(40)) + "," + ",".join(f"t3_{i}" for i in range(40)) + "," + ",".join(f"t4_{i}" for i in range(40)) + "\n"
+                    + ",".join(f"t0_{i}" for i in range(40)) + "," + ",".join(f"t1_{i}" for i in range(40)) + "," + ",".join(f"t2_{i}" for i in range(40)) + "," + ",".join(f"t3_{i}" for i in range(40)) + "," + ",".join(f"t4_{i}" for i in range(40)) + "\r\n"
                     + "2000,2,1,1,0,0,1,0,31,379000,-10000,-10200,1800,379,3750,3850,26,29,27,"
                     + ",".join("3800" for _ in range(95)) + ","
-                    + ",".join("27" for _ in range(200)) + "\n"
+                    + ",".join("27" for _ in range(200)) + "\r\n"
                     + "2250,2,1,1,0,0,1,0,31,379500,-9800,-10000,1820,379,3760,3860,26,29,27,"
                     + ",".join("3810" for _ in range(95)) + ","
-                    + ",".join("27" for _ in range(200)) + "\n"
+                    + ",".join("27" for _ in range(200)) + "\r\n"
                 ).encode('utf-8')
             }
         }

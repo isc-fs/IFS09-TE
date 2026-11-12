@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import ISC_RTT_serial as rtt
+import radio_protocol as rp
 
 try:
     import isc_marple
@@ -832,7 +833,7 @@ class DemoDataGenerator:
         dc_bus_v = max(int(PACK_V_DEPLETED), min(int(PACK_V_FULL) + 5,
                                                    int(self.v_load)))
 
-        return {
+        snap = {
             "tick_ms":            int(self.t * 1000) & 0xFFFFFFFF,
             "seq":                self.seq,
             "start_button":       1,
@@ -873,10 +874,54 @@ class DemoDataGenerator:
             "imu_roll_deg":       self.imu_roll_deg,
             "imu_pitch_deg":      self.imu_pitch_deg,
         }
+        snap.update(self._ifs09_fields(snap))
+        return snap
+
+    # ── IFS-09 synthetic channels: dual DTI inverters, LWS, IMU ──────────────
+    def _ifs09_fields(self, base: dict) -> dict:
+        v_kmh   = max(0.0, self.v * 3.6)
+        steer   = max(-220.0, min(220.0, self.g_lat * 90.0))
+        k       = 0.0012 * steer                      # outer wheel faster in a corner
+        spd_l   = v_kmh * (1.0 - k)
+        spd_r   = v_kmh * (1.0 + k)
+        def erpm(kmh: float) -> int:
+            wheel_rads = (kmh / 3.6) / rp.WHEEL_RADIUS_M
+            return int(wheel_rads * rp.GEAR_RATIO * 60.0 / (2.0 * math.pi) * rp.MOTOR_POLE_PAIRS)
+        i_ac    = (self.thr / 100.0) * 140.0 + random.gauss(0.0, 1.5)
+        out = {
+            "flags": 0, "vehicle_speed_kmh": round(v_kmh, 1),
+            "inv_speed_actual": round(v_kmh, 1),
+            "inv_pwrstg_bits": 0, "inv_torque_est_nm": int(self.thr * 1.2),
+            "inv_torque_max_feas": 220, "inv_ac_power_W": int(i_ac * base["inv_dc_bus_V"] * 0.9),
+            "lws_angle_deg": round(steer, 1), "lws_speed_dps": round(random.gauss(0.0, 3.0), 1),
+            "lws_status": 0, "lws_valid": 1,
+            "imu_yaw_rate_rads": round(math.radians(self.imu_gz_dps), 3),
+            "imu_ay_mps2": round(self.imu_ay_g * rp.G0, 2),
+            "imu_ax_mps2": round(self.imu_ax_g * rp.G0, 2), "imu_valid": 1,
+            "dti_speed_delta_kmh": round(spd_l - spd_r, 2),
+        }
+        for side, spd, sign in (("l", spd_l, 1.0), ("r", spd_r, 1.0 + 0.02)):
+            e = erpm(spd)
+            out.update({
+                f"dti_{side}_erpm": e, f"dti_{side}_mech_rpm": round(e / rp.MOTOR_POLE_PAIRS, 1),
+                f"dti_{side}_wheel_kmh": round(spd, 2),
+                f"dti_{side}_duty_pct": round(min(95.0, self.thr * 0.9), 1),
+                f"dti_{side}_vin_V": float(base["inv_dc_bus_V"]),
+                f"dti_{side}_ac_A": round(i_ac * sign, 1),
+                f"dti_{side}_dc_A": round(i_ac * 0.55 * sign, 1),
+                f"dti_{side}_ctrl_temp_C": round(self.T_pwrstg, 1),
+                f"dti_{side}_motor_temp_C": round(self.T_motor + (2.0 if side == "r" else 0.0), 1),
+                f"dti_{side}_fault": 0, f"dti_{side}_drive_en": 1,
+                f"dti_{side}_valid": 1, f"dti_{side}_erpm_valid": 1,
+            })
+        out["dti_dc_total_A"] = round(out["dti_l_dc_A"] + out["dti_r_dc_A"], 1)
+        out["dti_ac_total_A"] = round(out["dti_l_ac_A"] + out["dti_r_ac_A"], 1)
+        return out
 
     # ── Publish snapshot into rtt module (same path as real radio data) ──────
     def _publish(self, snap: dict, gps: dict) -> None:
         rtt.latest_data_dict["snapshot"] = snap
+        rtt.bump_version()          # tell the UI a new snapshot is available
 
         # GPS state (read by any UI component that checks gps_state — future use)
         rtt.latest_data_dict["gps_demo"] = gps

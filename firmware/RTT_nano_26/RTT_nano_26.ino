@@ -17,11 +17,11 @@
  * === TRANSMITTER PROTOCOL (feat/1, telemetry_task.cpp) ===
  *
  * ONE packet kind per 200 ms cycle (snapshot):
- *   SNAPSHOT  version=0x03  kind=6  frag_tot=5  — full vehicle state, 102 bytes total
+ *   SNAPSHOT  version=0x04  kind=6  frag_tot=5  — full vehicle state, 120 bytes total
  *
  * Common 32-byte on-air header (bytes 0-7):
  *   [0]     magic      0xEC
- *   [1]     version    0x03
+ *   [1]     version    0x04
  *   [2]     frag_idx   0 … (frag_tot-1)
  *   [3]     frag_tot   5
  *   [4..5]  seq        uint16_t LE
@@ -29,51 +29,8 @@
  *   [7]     reserved   0x00
  *   [8..31] data       24 bytes of snapshot slice
  *
- * Snapshot wire layout (102 bytes total, split across 5 × 24-byte fragments):
- *   [0..3]   tick_ms         uint32_t LE
- *   [4..5]   seq             uint16_t LE
- *   [6]      start_button    uint8_t
- *   [7..8]   apps1_raw       uint16_t LE
- *   [9..10]  apps2_raw       uint16_t LE
- *   [11..12] brake_raw       uint16_t LE
- *   [13..14] torque_pct      uint16_t LE
- *   [15]     ev_2_3          uint8_t
- *   [16]     t11_8_9         uint8_t
- *   [17]     ctrl_state      uint8_t
- *   [18]     ok_precharge    uint8_t
- *   [19]     ams_fsm_state   uint8_t
- *   [20..21] v_cell_min_mV   uint16_t LE
- *   [22]     soc             uint8_t
- *   [23..32] vmin_modulo[5]  5 × uint16_t LE
- *   [33..42] vmax_modulo[5]  5 × uint16_t LE
- *   [43..44] corriente_accu  int16_t LE
- *   [45..46] corriente_dcdc  int16_t LE
- *   [47..48] temp_dcdc       int16_t LE
- *   [49..58] temp_max_mod[5] 5 × int16_t LE
- *   [59]     inv_state       uint8_t
- *   [60]     vconfig_ready   uint8_t
- *   [61]     inv_error       uint8_t
- *   [62..63] inv_dc_bus_V    uint16_t LE
- *   [64..65] inv_temp_motor1 uint16_t LE
- *   [66..67] inv_temp_pwrstg uint16_t LE
- *   [68..69] inv_temp_board  uint16_t LE
- *   [70..73] inv_rpm         int32_t LE
- *   [74..77] inv_speed_actual int32_t LE
- *   [78..81] inv_current_actual int32_t LE
- *   [82..101] (reserved / zero-padded)
- *
- * Radio config (matches nrf24.c in IFS08-CE-ECU exactly):
- *   Channel  : 76 (0x4C)
- *   Address  : ECU01  {0x45,0x43,0x55,0x30,0x31}
- *   Payload  : 32 bytes fixed
- *   Data rate: 1 Mbps
- *   CRC      : 8-bit  (CONFIG=EN_CRC|PWR_UP, no CRCO bit)
- *   PA level : MAX + LNA Gain Enabled (RF24_PA_MAX, true) for max sensitivity (-95dBm)
- *   AutoAck  : disabled
- *   DynPD    : disabled
- *
- * VERBOSE 0: binary frames only  (use when connected to ISCmetrics host / serial.py)
- * VERBOSE 1: binary + human log  (use when monitoring with a serial terminal / PuTTY)
+ * Snapshot wire layout (120 bytes, 5 x 24-byte fragments): see radio_protocol.py
+ * (ground station) / radio_snapshot.hpp (IFS09-CE-ECU). The Nano only relays.
  */
 
 #include <SPI.h>
@@ -98,9 +55,9 @@ static const uint8_t  PAYLOAD   = 32;
 static const uint8_t MAGIC              = 0xECu;
 
 // --- feat/1 (current) protocol ---
-static const uint8_t VERSION_SNAPSHOT   = 0x03u;
+static const uint8_t VERSION_SNAPSHOT   = 0x04u;
 static const uint8_t KIND_SNAPSHOT      = 6u;    // single snapshot kind
-static const uint8_t FRAG_SNAPSHOT      = 5u;    // 5 fragments × 24 bytes = 120 >= 102
+static const uint8_t FRAG_SNAPSHOT      = 5u;    // 5 fragments × 24 bytes = 120 >= 120
 
 // --- Legacy feat/telemetry-port protocol (keep for backward compat) ---
 static const uint8_t VERSION_LEGACY     = 0x02u;
@@ -145,7 +102,7 @@ static void dumpHex(const uint8_t* p, uint8_t n) {
 
 // Validate the 8-byte fragment header in buf[].
 // Returns true if the packet should be forwarded.
-// Handles both current (v0x03/kind=6) and legacy (v0x02/kind=0x03|0x04) protocols.
+// Handles both current (v0x04/kind=6) and legacy (v0x02/kind=0x03|0x04) protocols.
 static bool validateHeader() {
     if (buf[0] != MAGIC) return false;
 
@@ -154,7 +111,7 @@ static bool validateHeader() {
     uint8_t ftot = buf[3];
     uint8_t fidx = buf[2];
 
-    // --- Current protocol: version 0x03, kind=6, 5 fragments ---
+    // --- Current protocol: version 0x04, kind=6, 5 fragments ---
     if (ver == VERSION_SNAPSHOT && kind == KIND_SNAPSHOT) {
         return (ftot == FRAG_SNAPSHOT) && (fidx < FRAG_SNAPSHOT);
     }
@@ -241,7 +198,7 @@ void setup() {
 #if VERBOSE
         Serial.println(F("[RADIO] nRF24L01+ PA+LNA OK — ch76, 1Mbps, CRC8, PA_MAX + LNA Enabled, addr=ECU01"));
         Serial.println(F("[RADIO] Pins: CE=D7, CSN=D8, LED_COMM=D2, LED_DETECTED=D3"));
-        Serial.println(F("[PROTO] Accepting v0x03/kind=6 (snapshot) and v0x02/kind=3,4 (legacy)"));
+        Serial.println(F("[PROTO] Accepting v0x04/kind=6 (snapshot) and v0x02/kind=3,4 (legacy)"));
         radio.printDetails();
 #endif
     } else {
